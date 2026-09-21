@@ -146,8 +146,12 @@ static void wifi_event(WiFiEvent_t ev, WiFiEventInfo_t info)
         logmsg("wifi: associated, waiting for IP");
         break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-        snprintf(m, sizeof(m), "wifi: got ip=%s rssi=%d ch=%d",
-                 WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
+        /* RSSI guide: > -60 good, -70 usable, < -80 marginal. A persistently
+         * low value here means the U.FL antenna is missing, unseated, or
+         * shadowed by the display board -- not something firmware can fix. */
+        snprintf(m, sizeof(m), "wifi: got ip=%s rssi=%d dBm ch=%d txpower=%d",
+                 WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel(),
+                 (int)WiFi.getTxPower());
         logmsg(m);
         break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -168,6 +172,10 @@ static void wifi_start()
     WiFi.setHostname(HOSTNAME);
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);          /* sleep can stall association on some APs */
+    /* Ask for full transmit power explicitly rather than trusting the default.
+     * Worth doing on this board: the XIAO S3 has no usable on-board antenna,
+     * so link margin is tight and every dB counts. */
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
 }
 
