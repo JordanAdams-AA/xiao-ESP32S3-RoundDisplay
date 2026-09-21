@@ -2,6 +2,23 @@
  * XIAO ESP32-S3 + Round Display (GC9A01 240x240) analog watch face.
  * Temperature/humidity from Home Assistant over MQTT; time from NTP.
  * Web + serial-free debugging via MQTT logs; OTA via ElegantOTA.
+ *
+ * Threading model
+ * ---------------
+ * Rendering and networking run as two pinned FreeRTOS tasks:
+ *
+ *   ui_task  (core 1) -- LVGL, the clock, the backlight. Never blocks.
+ *   net_task (core 0) -- Wi-Fi, MQTT, WebServer/OTA. Free to block.
+ *
+ * Core 0 is where the Wi-Fi driver already lives, so the blocking calls
+ * (mqtt.connect(), DNS, scans) sit next to it and can no longer stall the
+ * display. This is what removes the multi-second freezes of the second hand.
+ *
+ * Two libraries here are NOT thread-safe, so the boundary is strict:
+ *   - LVGL: only ui_task may call lv_*() or ui_*(). net_task hands values
+ *     over through `pending` under `pending_mux` instead of drawing.
+ *   - PubSubClient: every use goes through `mqtt_mux`, because Wi-Fi events
+ *     are delivered on a third task (the Arduino event task) that also logs.
  */
 #include <Arduino.h>
 #include <WiFi.h>
@@ -13,10 +30,14 @@
 #include <lvgl.h>
 #include <Arduino_GFX_Library.h>
 #include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
 
 #include "config.h"
 #include "secrets.h"
 #include "ui.h"
+
+#define UI_CORE   1
+#define NET_CORE  0
 
 /* ---------------- Display ---------------- */
 static Arduino_DataBus *bus =
@@ -46,10 +67,50 @@ static WiFiClient   net;
 static PubSubClient mqtt(net);
 static WebServer    server(80);
 
+/* Recursive: mqtt_service() logs while already holding the lock. */
+static SemaphoreHandle_t mqtt_mux;
+
 static void logmsg(const char *m)
 {
     Serial.println(m);
-    if (mqtt.connected()) mqtt.publish(TOPIC_LOG, m);
+    if (xSemaphoreTakeRecursive(mqtt_mux, pdMS_TO_TICKS(200)) == pdTRUE) {
+        if (mqtt.connected()) mqtt.publish(TOPIC_LOG, m);
+        xSemaphoreGiveRecursive(mqtt_mux);
+    }
+}
+
+/* ---------------- net -> ui handover ----------------
+ * The MQTT callback runs on net_task and must not touch LVGL, so it only
+ * parks the value here. ui_task picks it up on its next pass and draws it. */
+static SemaphoreHandle_t pending_mux;
+static struct {
+    float temp,  hum;
+    bool  temp_valid, hum_valid;
+    bool  temp_dirty, hum_dirty;
+} pending;
+
+static void pending_put(bool is_temp, float v, bool valid)
+{
+    if (xSemaphoreTake(pending_mux, pdMS_TO_TICKS(50)) != pdTRUE) return;
+    if (is_temp) { pending.temp = v; pending.temp_valid = valid; pending.temp_dirty = true; }
+    else         { pending.hum  = v; pending.hum_valid  = valid; pending.hum_dirty  = true; }
+    xSemaphoreGive(pending_mux);
+}
+
+/* ui_task only. Copies out under the lock, then draws outside it. */
+static void pending_drain()
+{
+    float t = 0, h = 0;
+    bool tv = false, hv = false, td = false, hd = false;
+
+    if (xSemaphoreTake(pending_mux, 0) != pdTRUE) return;   /* try again next pass */
+    td = pending.temp_dirty; t = pending.temp; tv = pending.temp_valid;
+    hd = pending.hum_dirty;  h = pending.hum;  hv = pending.hum_valid;
+    pending.temp_dirty = pending.hum_dirty = false;
+    xSemaphoreGive(pending_mux);
+
+    if (td) ui_set_temperature(t, tv);
+    if (hd) ui_set_humidity(h, hv);
 }
 
 /* ---------------- Backlight (core 2.x / 3.x compatible) ---------------- */
@@ -115,7 +176,7 @@ static void wifi_service()
     if (WiFi.status() == WL_CONNECTED) return;
 
     static uint32_t last = 0;
-    if (millis() - last < 10000) return;   /* retry every 10 s, non-blocking */
+    if (millis() - last < 10000) return;   /* retry every 10 s */
     last = millis();
 
     char m[96];
@@ -143,10 +204,11 @@ static void mqtt_cb(char *topic, byte *payload, unsigned int len)
     bool valid = payload_is_number(buf);
     float v = atof(buf);
 
+    /* net_task context: park the value, ui_task draws it. */
     if (strcmp(topic, TOPIC_TEMPERATURE) == 0) {
-        ui_set_temperature(v, valid);
+        pending_put(true, v, valid);
     } else if (strcmp(topic, TOPIC_HUMIDITY) == 0) {
-        ui_set_humidity(v, valid);
+        pending_put(false, v, valid);
     }
 }
 
@@ -154,16 +216,32 @@ static void mqtt_service()
 {
     if (WiFi.status() != WL_CONNECTED) return;
 
+    if (xSemaphoreTakeRecursive(mqtt_mux, pdMS_TO_TICKS(200)) != pdTRUE) return;
+
     if (mqtt.connected()) {
         mqtt.loop();
+        xSemaphoreGiveRecursive(mqtt_mux);
         return;
     }
+
     static uint32_t last = 0;
-    if (millis() - last < 3000) return;   /* non-blocking backoff */
+    if (millis() - last < 3000) {          /* backoff between connect attempts */
+        xSemaphoreGiveRecursive(mqtt_mux);
+        return;
+    }
     last = millis();
 
-    /* LWT: broker publishes "offline" to TOPIC_STATUS if we drop */
-    if (mqtt.connect(HOSTNAME, MQTT_USER, MQTT_PASS, TOPIC_STATUS, 0, true, "offline")) {
+    /* Blocking, but this is core 0 now -- the UI keeps rendering throughout.
+     * The timeouts above bound it well inside the task-watchdog window; an
+     * unreachable broker over a weak link would otherwise sit here long
+     * enough to starve the core 0 idle task and panic the device. */
+    uint32_t t_connect = millis();
+    Serial.printf("mqtt: connecting to %s:%d ...\n", MQTT_HOST, MQTT_PORT);
+    bool ok = mqtt.connect(HOSTNAME, MQTT_USER, MQTT_PASS, TOPIC_STATUS, 0, true, "offline");
+    Serial.printf("mqtt: connect %s after %lums (state=%d)\n",
+                  ok ? "OK" : "FAILED",
+                  (unsigned long)(millis() - t_connect), mqtt.state());
+    if (ok) {
         mqtt.publish(TOPIC_STATUS, "online", true);
         mqtt.subscribe(TOPIC_TEMPERATURE);
         mqtt.subscribe(TOPIC_HUMIDITY);
@@ -173,6 +251,7 @@ static void mqtt_service()
                  (unsigned)ESP.getFreeHeap());
         logmsg(m);
     }
+    xSemaphoreGiveRecursive(mqtt_mux);
 }
 
 /* ---------------- HTTP status page + OTA ---------------- */
@@ -190,29 +269,25 @@ static void handle_root()
     server.send(200, "text/html", html);
 }
 
-/* ---------------- Time ---------------- */
+/* ---------------- Time (ui_task only) ---------------- */
 static void update_clock()
 {
+    /* Read the clock without blocking. getLocalTime() sleeps internally while
+     * the year is still 1970, which would stall the render loop every pass. */
+    time_t now = time(nullptr);
     struct tm ti;
-    /* getLocalTime() reports false until NTP has set a plausible year. Fall
-     * back to the raw system clock so the hands still sweep while Wi-Fi/NTP
-     * come up -- otherwise the whole face looks dead. */
-    bool synced = getLocalTime(&ti, 5);
-    if (!synced) {
-        time_t now = time(nullptr);
-        localtime_r(&now, &ti);
-    }
+    localtime_r(&now, &ti);
+    bool synced = (ti.tm_year > (2016 - 1900));
 
-    /* Smooth second hand: interpolate between whole seconds using millis() */
+    /* One discrete tick per second. Redrawing only on a second boundary is
+     * both the look that was asked for and far less work than the old ~20 Hz
+     * interpolated sweep, which is what made the motion look uneven. */
     static int lastSec = -1;
-    static uint32_t secMs = 0;
-    if (ti.tm_sec != lastSec) { lastSec = ti.tm_sec; secMs = millis(); }
-    float frac = (millis() - secMs) / 1000.0f;
-    if (frac > 1.0f) frac = 1.0f;
-    float secf = ti.tm_sec + frac;
+    if (ti.tm_sec == lastSec) return;
+    lastSec = ti.tm_sec;
 
-    ui_set_time(ti.tm_hour, ti.tm_min, secf, ti.tm_wday, ti.tm_mday, ti.tm_mon);
-    if (!synced) ui_set_time_unknown();   /* hands move; digital stays "--:--" */
+    ui_set_time(ti.tm_hour, ti.tm_min, (float)ti.tm_sec,
+                ti.tm_wday, ti.tm_mday, ti.tm_mon, synced);
 
     /* Night dimming */
     static int lastDim = -1;
@@ -224,6 +299,77 @@ static void update_clock()
 }
 
 /* ==================================================================== */
+/* Core 1: rendering only. Nothing in here is allowed to block.         */
+static void ui_task(void *)
+{
+    for (;;) {
+        lv_timer_handler();
+        pending_drain();
+        update_clock();
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+/* Core 0: everything that may block, next to the Wi-Fi driver.         */
+static void net_task(void *)
+{
+    WiFi.onEvent(wifi_event);
+    wifi_start();
+
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000)
+        vTaskDelay(pdMS_TO_TICKS(100));   /* UI is on the other core, unaffected */
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("wifi: connected in %lums, ip=%s\n",
+                      (unsigned long)(millis() - t0),
+                      WiFi.localIP().toString().c_str());
+    } else {
+        Serial.printf("wifi: NOT connected after 15s (status=%d). "
+                      "Scanning for the configured SSID...\n", (int)WiFi.status());
+        int n = WiFi.scanNetworks();
+        bool found = false;
+        for (int i = 0; i < n; i++) {
+            if (WiFi.SSID(i) == String(WIFI_SSID)) {
+                found = true;
+                Serial.printf("  FOUND \"%s\" rssi=%d ch=%d enc=%d\n",
+                              WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+                              WiFi.channel(i), (int)WiFi.encryptionType(i));
+            }
+        }
+        if (!found)
+            Serial.printf("  SSID \"%s\" NOT visible (%d networks seen). "
+                          "Check spelling/case, or it is 5GHz-only.\n", WIFI_SSID, n);
+        WiFi.scanDelete();
+        wifi_start();
+    }
+
+    configTzTime(TZ_INFO, "pool.ntp.org", "time.cloudflare.com");
+
+    mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setCallback(mqtt_cb);
+    mqtt.setBufferSize(512);
+    /* Bound how long a single broker attempt can block this task. Without
+     * these, an unreachable broker blocks for the stack default (tens of
+     * seconds), which trips the task watchdog. WiFiClient::setTimeout()
+     * takes SECONDS on the ESP32 core, not milliseconds. */
+    net.setTimeout(3);
+    mqtt.setSocketTimeout(3);
+
+    server.on("/", handle_root);
+    ElegantOTA.begin(&server);
+    ElegantOTA.setAuth("admin", OTA_PASSWORD);
+    server.begin();
+
+    for (;;) {
+        wifi_service();
+        server.handleClient();
+        ElegantOTA.loop();
+        mqtt_service();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -234,6 +380,16 @@ void setup()
     Serial.printf("xiao-watchface boot, ssid=\"%s\" core=%d.%d.%d\n",
                   WIFI_SSID, ESP_ARDUINO_VERSION_MAJOR,
                   ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH);
+
+    mqtt_mux    = xSemaphoreCreateRecursiveMutex();
+    pending_mux = xSemaphoreCreateMutex();
+
+    /* net_task deliberately makes blocking socket calls on core 0, so the
+     * core 0 idle task can go unscheduled for longer than the 5 s default.
+     * Each individual call is bounded to ~3 s (see net.setTimeout below),
+     * so 15 s leaves headroom while still catching a genuine hang. Panic is
+     * kept on: a reboot is the right response to a wedged network task. */
+    esp_task_wdt_init(15, true);
 
     backlight_init();
     gfx->begin();
@@ -257,70 +413,19 @@ void setup()
     ui_create();
 
 #if USE_DUMMY_DATA
-    ui_set_temperature(DUMMY_TEMP, true);
+    ui_set_temperature(DUMMY_TEMP, true);   /* safe: no tasks running yet */
     ui_set_humidity(DUMMY_HUM, true);
 #endif
 
-    /* WiFi */
-    WiFi.onEvent(wifi_event);
-    wifi_start();
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
-        lv_timer_handler();   /* keep the face alive while connecting */
-        delay(10);
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("wifi: connected in %lums, ip=%s\n",
-                      (unsigned long)(millis() - t0),
-                      WiFi.localIP().toString().c_str());
-    } else {
-        Serial.printf("wifi: NOT connected after 15s (status=%d). "
-                      "Scanning for the configured SSID...\n", (int)WiFi.status());
-        int n = WiFi.scanNetworks();
-        bool found = false;
-        for (int i = 0; i < n; i++) {
-            if (WiFi.SSID(i) == String(WIFI_SSID)) {
-                found = true;
-                Serial.printf("  FOUND \"%s\" rssi=%d ch=%d enc=%d\n",
-                              WiFi.SSID(i).c_str(), WiFi.RSSI(i),
-                              WiFi.channel(i), (int)WiFi.encryptionType(i));
-            }
-        }
-        if (!found)
-            Serial.printf("  SSID \"%s\" NOT visible (%d networks seen). "
-                          "Check spelling/case, or it is 5GHz-only.\n", WIFI_SSID, n);
-        WiFi.scanDelete();
-        wifi_start();   /* keep trying in the background */
-    }
-
-    /* NTP */
-    configTzTime(TZ_INFO, "pool.ntp.org", "time.cloudflare.com");
-
-    /* MQTT */
-    mqtt.setServer(MQTT_HOST, MQTT_PORT);
-    mqtt.setCallback(mqtt_cb);
-    mqtt.setBufferSize(512);
-
-    /* OTA + status page */
-    server.on("/", handle_root);
-    ElegantOTA.begin(&server);
-    ElegantOTA.setAuth("admin", OTA_PASSWORD);
-    server.begin();
+    /* UI first so the face is live before the network bring-up starts. */
+    xTaskCreatePinnedToCore(ui_task,  "ui",  8192, NULL, 3, NULL, UI_CORE);
+    xTaskCreatePinnedToCore(net_task, "net", 8192, NULL, 2, NULL, NET_CORE);
 }
 
 void loop()
 {
-    lv_timer_handler();
-    wifi_service();
-    server.handleClient();
-    ElegantOTA.loop();
-    mqtt_service();
-
-    static uint32_t last = 0;
-    if (millis() - last >= 50) {   /* ~20 fps clock update for a smooth sweep */
-        last = millis();
-        update_clock();
-    }
-    delay(5);
+    /* Both jobs live in their own pinned tasks now. Keep the Arduino loop
+     * task idle rather than deleting it; ElegantOTA and WebServer expect the
+     * scheduler to stay in its normal shape. */
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }

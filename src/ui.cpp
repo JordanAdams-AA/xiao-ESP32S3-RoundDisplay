@@ -26,6 +26,16 @@ static lv_obj_t *lbl_day,  *lbl_month;
 /* Static background (tick ring + numbers), drawn once onto a canvas in PSRAM */
 static lv_color_t *cbuf = NULL;
 
+/* Last values written to the text labels, so a per-second tick does not
+ * redraw text that has not changed. ui_set_time_unknown() resets these:
+ * it writes the same labels, so the cache would otherwise suppress the
+ * first real update and leave "--:--" on screen until the minute rolled. */
+static int last_hour = -1, last_min = -1, last_wday = -1,
+           last_mday = -1, last_month = -1;
+
+/* True while the digital readout shows placeholders instead of a real time. */
+static bool showing_unknown = false;
+
 static const char *WDAYS[7]  = {"Sunday","Monday","Tuesday","Wednesday",
                                 "Thursday","Friday","Saturday"};
 static const char *MONTHS[12] = {"JAN","FEB","MAR","APR","MAY","JUN",
@@ -229,7 +239,8 @@ void ui_create(void)
 }
 
 /* --------------------------------------------------------------------- */
-void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month)
+void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
+                 bool synced)
 {
     float sa = sec / 60.0f * 360.0f;
     float ma = (minute + sec / 60.0f) / 60.0f * 360.0f;
@@ -239,26 +250,54 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month)
     set_hand(pts_min,  hand_min,  ma, 90, 0);
     set_hand(pts_sec,  hand_sec,  sa, 100, 20);
 
-    char t[8];
-    snprintf(t, sizeof(t), "%02d:%02d", hour, minute);
-    lv_label_set_text(lbl_time, t);
+    /* Before NTP resolves, the hands still tick off the system clock so the
+     * face is visibly alive, but the digital readout must not show 1970.
+     * Written once on entry to that state, not every second. */
+    if (!synced) {
+        if (!showing_unknown) {
+            showing_unknown = true;
+            lv_label_set_text(lbl_time,  "--:--");
+            lv_label_set_text(lbl_wday,  "syncing");
+            lv_label_set_text(lbl_day,   "--");
+            lv_label_set_text(lbl_month, "---");
+            last_hour = last_min = last_wday = last_mday = last_month = -1;
+        }
+        return;
+    }
 
-    if (wday >= 0 && wday < 7)   lv_label_set_text(lbl_wday, WDAYS[wday]);
+    /* Leaving the unknown state: the labels hold placeholders, so the cache
+     * below must not suppress the first real write. */
+    if (showing_unknown) {
+        showing_unknown = false;
+        last_hour = last_min = last_wday = last_mday = last_month = -1;
+    }
 
-    char d[4];
-    snprintf(d, sizeof(d), "%d", mday);
-    lv_label_set_text(lbl_day, d);
-    if (month >= 0 && month < 12) lv_label_set_text(lbl_month, MONTHS[month]);
-}
+    /* The hands move every second, the text almost never does. Rewriting a
+     * label invalidates its area and costs another SPI flush, so only touch
+     * the ones whose value actually changed. */
+    if (hour != last_hour || minute != last_min) {
+        last_hour = hour; last_min = minute;
+        char t[8];
+        snprintf(t, sizeof(t), "%02d:%02d", hour, minute);
+        lv_label_set_text(lbl_time, t);
+    }
 
-void ui_set_time_unknown(void)
-{
-    /* Digital readout only. The hands keep moving off the (unsynced) system
-     * clock so the face is visibly alive while NTP/Wi-Fi are still coming up. */
-    lv_label_set_text(lbl_time, "--:--");
-    lv_label_set_text(lbl_wday, "syncing");
-    lv_label_set_text(lbl_day, "--");
-    lv_label_set_text(lbl_month, "---");
+    if (wday != last_wday && wday >= 0 && wday < 7) {
+        last_wday = wday;
+        lv_label_set_text(lbl_wday, WDAYS[wday]);
+    }
+
+    if (mday != last_mday) {
+        last_mday = mday;
+        char d[4];
+        snprintf(d, sizeof(d), "%d", mday);
+        lv_label_set_text(lbl_day, d);
+    }
+
+    if (month != last_month && month >= 0 && month < 12) {
+        last_month = month;
+        lv_label_set_text(lbl_month, MONTHS[month]);
+    }
 }
 
 /* --------------------------------------------------------------------- */
