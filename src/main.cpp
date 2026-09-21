@@ -35,6 +35,7 @@
 #include "config.h"
 #include "secrets.h"
 #include "ui.h"
+#include "touch.h"
 
 #define UI_CORE   1
 #define NET_CORE  0
@@ -306,6 +307,48 @@ static void update_clock()
     if (want != lastDim) { backlight_set((uint8_t)want); lastDim = want; }
 }
 
+/* ---------------- Paging (ui_task only) ----------------
+ * The CST816 reports swipes itself, so there is no LVGL input device and no
+ * dependence on the touch panel's axes matching the display rotation. */
+static void service_pages()
+{
+    /* Set once a swipe has actually changed a page. The touch chip cannot be
+     * probed at rest, so "present" is only an inference from the RTC being on
+     * the same bus -- this is the proof that the panel really works. */
+    static bool swipe_works = false;
+
+    if (touch_present()) {
+        TouchGesture g = touch_poll();
+        if (g != TG_NONE)
+            Serial.printf("touch: gesture=%d travel=%u\n",
+                          (int)g, (unsigned)touch_last_raw());
+
+        switch (g) {
+        case TG_LEFT:               /* content moves left -> next page */
+            swipe_works = true;
+            if (SWIPE_INVERT) ui_page_prev(); else ui_page_next();
+            break;
+        case TG_RIGHT:
+            swipe_works = true;
+            if (SWIPE_INVERT) ui_page_next(); else ui_page_prev();
+            break;
+        default:
+            break;
+        }
+    }
+
+#if AUTO_PAGE_SECONDS > 0
+    /* Keep the second page reachable until swiping is known to work, so a
+     * dead or mis-wired panel cannot strand the face on page 1. */
+    if (swipe_works) return;
+    static uint32_t last = 0;
+    if (millis() - last >= (uint32_t)AUTO_PAGE_SECONDS * 1000) {
+        last = millis();
+        ui_page_next();
+    }
+#endif
+}
+
 /* ==================================================================== */
 /* Core 1: rendering only. Nothing in here is allowed to block.         */
 static void ui_task(void *)
@@ -314,6 +357,7 @@ static void ui_task(void *)
         lv_timer_handler();
         pending_drain();
         update_clock();
+        service_pages();
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -417,6 +461,9 @@ void setup()
     disp_drv.flush_cb = flush_cb;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
+
+    /* Probe touch before the tasks start so the result is logged in order. */
+    touch_init();
 
     ui_create();
 

@@ -16,6 +16,30 @@
 #define SCREEN_W 240
 #define SCREEN_H 240
 
+/* Capacitive touch (CHSC6X) on the Round Display's I2C bus.
+ * D4/D5 are the XIAO's hardware I2C pins (GPIO5/GPIO6).
+ *
+ * The controller only acknowledges I2C while a finger is actually down, so
+ * it cannot be found by a bus scan. It raises PIN_TOUCH_INT low instead, and
+ * that is what the driver watches. The PCF8563 RTC at 0x51 is the reliable
+ * proof that the display board is attached at all. */
+#define PIN_TOUCH_SDA   D4
+#define PIN_TOUCH_SCL   D5
+#define PIN_TOUCH_INT   D7
+#define TOUCH_I2C_ADDR  0x2E
+#define RTC_I2C_ADDR    0x51
+
+/* Minimum horizontal travel (pixels) before a drag counts as a swipe. */
+#define SWIPE_MIN_PX 40
+
+/* Set to 1 if a swipe moves the pages the wrong way. The touch panel's axes
+ * are not guaranteed to line up with the display's rotation. */
+#define SWIPE_INVERT 0
+
+/* Fallback when no touch controller is detected: cycle the pages on a timer
+ * so the second page is still reachable. 0 disables it (stays on page 1). */
+#define AUTO_PAGE_SECONDS 20
+
 /* =====================================================================
  *  MQTT TOPICS
  *  These are the Home Assistant mqtt_statestream topics for your

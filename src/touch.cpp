@@ -1,0 +1,100 @@
+#include "touch.h"
+#include "config.h"
+#include <Arduino.h>
+#include <Wire.h>
+
+/* CHSC6X on the Seeed Round Display.
+ *
+ * Unlike the CST816 it has no gesture register and, more awkwardly, it only
+ * acknowledges I2C while a finger is down -- a bus scan at rest finds nothing.
+ * Touch is therefore detected from the interrupt line, and swipes are
+ * reconstructed from the start/end coordinates of each touch. */
+#define CHSC6X_POINT_LEN 5
+
+static bool    present  = false;
+static uint8_t last_raw = 0;
+
+/* Drag tracking across polls */
+static bool tracking = false;
+static int  start_x = 0, start_y = 0;
+static int  cur_x   = 0, cur_y   = 0;
+
+static bool pressed(void)
+{
+    if (digitalRead(PIN_TOUCH_INT) != LOW) return false;
+    delay(1);                                    /* reject a single glitch */
+    return digitalRead(PIN_TOUCH_INT) == LOW;
+}
+
+static bool read_point(int *x, int *y)
+{
+    uint8_t b[CHSC6X_POINT_LEN] = {0};
+    if (Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)CHSC6X_POINT_LEN)
+        != CHSC6X_POINT_LEN)
+        return false;
+    for (int i = 0; i < CHSC6X_POINT_LEN; i++) b[i] = Wire.read();
+    /* b[0] is a status/'1 point' marker; the coordinates are single bytes,
+     * which is why this panel tops out at 255 and suits a 240px screen. */
+    *x = b[2];
+    *y = b[4];
+    return true;
+}
+
+bool touch_init(void)
+{
+    Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);
+    Wire.setClock(400000);
+    pinMode(PIN_TOUCH_INT, INPUT_PULLUP);
+
+    /* The touch chip is silent at rest, so presence is inferred from the RTC
+     * on the same board: if it answers, the display board is attached and the
+     * touch panel should be there too. */
+    Wire.beginTransmission(RTC_I2C_ADDR);
+    bool board = (Wire.endTransmission(true) == 0);
+
+    present = board;
+    if (present)
+        Serial.printf("touch: display board detected (RTC 0x%02X); "
+                      "CHSC6X on INT=D%d, addr 0x%02X\n",
+                      RTC_I2C_ADDR, 7, TOUCH_I2C_ADDR);
+    else
+        Serial.printf("touch: no device on SDA=%d SCL=%d -- display board's "
+                      "I2C side not connected. Swipe disabled.\n",
+                      PIN_TOUCH_SDA, PIN_TOUCH_SCL);
+    return present;
+}
+
+bool touch_present(void) { return present; }
+uint8_t touch_last_raw(void) { return last_raw; }
+
+TouchGesture touch_poll(void)
+{
+    if (!present) return TG_NONE;
+
+    if (pressed()) {
+        int x, y;
+        if (!read_point(&x, &y)) return TG_NONE;
+        if (!tracking) {
+            tracking = true;
+            start_x = cur_x = x;
+            start_y = cur_y = y;
+        } else {
+            cur_x = x;
+            cur_y = y;
+        }
+        return TG_NONE;                 /* decide on release */
+    }
+
+    if (!tracking) return TG_NONE;
+    tracking = false;
+
+    int dx = cur_x - start_x;
+    int dy = cur_y - start_y;
+    int ax = abs(dx), ay = abs(dy);
+    last_raw = (uint8_t)(ax > ay ? ax : ay);
+
+    if (ax >= SWIPE_MIN_PX && ax > ay) return dx < 0 ? TG_LEFT : TG_RIGHT;
+    if (ay >= SWIPE_MIN_PX && ay > ax) return dy < 0 ? TG_UP   : TG_DOWN;
+    if (ax < 12 && ay < 12)            return TG_TAP;
+    return TG_NONE;
+}
