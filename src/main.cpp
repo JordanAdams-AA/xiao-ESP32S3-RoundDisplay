@@ -49,7 +49,6 @@ static Arduino_GFX *gfx =
 /* ---------------- LVGL ---------------- */
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *lvbuf1;
-static const uint32_t LVBUF_LINES = 40;   /* partial buffer, 40 lines tall */
 
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
@@ -353,8 +352,30 @@ static void service_pages()
 /* Core 1: rendering only. Nothing in here is allowed to block.         */
 static void ui_task(void *)
 {
+#if PERF_LOG_SECONDS > 0
+    uint32_t worst = 0, total = 0, calls = 0, next_report = 0;
+#endif
     for (;;) {
+#if PERF_LOG_SECONDS > 0
+        uint32_t t0 = millis();
         lv_timer_handler();
+        uint32_t dt = millis() - t0;
+        if (dt > worst) worst = dt;
+        total += dt;
+        calls++;
+        if (millis() > next_report) {
+            next_report = millis() + (uint32_t)PERF_LOG_SECONDS * 1000;
+            /* Worst case is the number that matters: it is how long touch
+             * sampling and the clock stall while a repaint is in flight. */
+            Serial.printf("perf: lv_timer_handler avg=%lums worst=%lums over "
+                          "%lu calls\n",
+                          (unsigned long)(calls ? total / calls : 0),
+                          (unsigned long)worst, (unsigned long)calls);
+            worst = total = calls = 0;
+        }
+#else
+        lv_timer_handler();
+#endif
         pending_drain();
         update_clock();
         service_pages();
@@ -444,14 +465,18 @@ void setup()
     esp_task_wdt_init(15, true);
 
     backlight_init();
-    gfx->begin();
+    gfx->begin(GFX_SPI_HZ);
     gfx->fillScreen(BLACK);
 
     lv_init();
 
     size_t bufsz = SCREEN_W * LVBUF_LINES * sizeof(lv_color_t);
     lvbuf1 = (lv_color_t *)heap_caps_malloc(bufsz, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    bool buf_internal = (lvbuf1 != NULL);
     if (!lvbuf1) lvbuf1 = (lv_color_t *)heap_caps_malloc(bufsz, MALLOC_CAP_SPIRAM);
+    Serial.printf("lvgl: draw buffer %u bytes (%u lines) in %s\n",
+                  (unsigned)bufsz, (unsigned)LVBUF_LINES,
+                  buf_internal ? "internal DMA RAM" : "PSRAM");
     lv_disp_draw_buf_init(&draw_buf, lvbuf1, NULL, SCREEN_W * LVBUF_LINES);
 
     static lv_disp_drv_t disp_drv;

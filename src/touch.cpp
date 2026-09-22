@@ -5,25 +5,35 @@
 
 /* CHSC6X on the Seeed Round Display.
  *
- * Unlike the CST816 it has no gesture register and, more awkwardly, it only
- * acknowledges I2C while a finger is down -- a bus scan at rest finds nothing.
- * Touch is therefore detected from the interrupt line, and swipes are
- * reconstructed from the start/end coordinates of each touch. */
+ * Two properties of this controller shape the driver:
+ *   - No gesture register, so swipes are reconstructed from the start and end
+ *     coordinates of each touch.
+ *   - It only acknowledges I2C while a finger is down, so it cannot be found
+ *     by a bus scan; the interrupt line on D7 is what announces a touch.
+ *
+ * INT is latched in an ISR rather than sampled. Polling it directly missed
+ * most swipes: the line can pulse briefly on data-ready instead of staying
+ * low for the whole touch, and a poll every few milliseconds -- with gaps of
+ * tens of milliseconds whenever LVGL is mid-redraw -- simply walked past it.
+ * An edge cannot be missed this way even while the UI task is busy. */
 #define CHSC6X_POINT_LEN 5
+
+/* A touch is finished once this long passes with no further INT activity. */
+#define TOUCH_IDLE_MS 90
 
 static bool    present  = false;
 static uint8_t last_raw = 0;
 
-/* Drag tracking across polls */
-static bool tracking = false;
-static int  start_x = 0, start_y = 0;
-static int  cur_x   = 0, cur_y   = 0;
+static volatile bool irq_hit = false;
 
-static bool pressed(void)
+static bool     tracking = false;
+static int      start_x = 0, start_y = 0;
+static int      cur_x   = 0, cur_y   = 0;
+static uint32_t last_ms = 0;
+
+static void IRAM_ATTR touch_isr(void)
 {
-    if (digitalRead(PIN_TOUCH_INT) != LOW) return false;
-    delay(1);                                    /* reject a single glitch */
-    return digitalRead(PIN_TOUCH_INT) == LOW;
+    irq_hit = true;
 }
 
 static bool read_point(int *x, int *y)
@@ -33,8 +43,9 @@ static bool read_point(int *x, int *y)
         != CHSC6X_POINT_LEN)
         return false;
     for (int i = 0; i < CHSC6X_POINT_LEN; i++) b[i] = Wire.read();
-    /* b[0] is a status/'1 point' marker; the coordinates are single bytes,
+    /* b[0] is a status/'points present' marker; coordinates are single bytes,
      * which is why this panel tops out at 255 and suits a 240px screen. */
+    if (b[0] == 0) return false;
     *x = b[2];
     *y = b[4];
     return true;
@@ -53,14 +64,16 @@ bool touch_init(void)
     bool board = (Wire.endTransmission(true) == 0);
 
     present = board;
-    if (present)
+    if (present) {
+        attachInterrupt(digitalPinToInterrupt(PIN_TOUCH_INT), touch_isr, FALLING);
         Serial.printf("touch: display board detected (RTC 0x%02X); "
-                      "CHSC6X on INT=D%d, addr 0x%02X\n",
-                      RTC_I2C_ADDR, 7, TOUCH_I2C_ADDR);
-    else
+                      "CHSC6X addr 0x%02X, INT on GPIO%d (edge latched)\n",
+                      RTC_I2C_ADDR, TOUCH_I2C_ADDR, PIN_TOUCH_INT);
+    } else {
         Serial.printf("touch: no device on SDA=%d SCL=%d -- display board's "
                       "I2C side not connected. Swipe disabled.\n",
                       PIN_TOUCH_SDA, PIN_TOUCH_SCL);
+    }
     return present;
 }
 
@@ -71,21 +84,27 @@ TouchGesture touch_poll(void)
 {
     if (!present) return TG_NONE;
 
-    if (pressed()) {
+    /* Either a latched edge or a still-asserted line means "finger down".
+     * Handling both covers a pulsed INT and a level-held INT alike. */
+    bool active = irq_hit || (digitalRead(PIN_TOUCH_INT) == LOW);
+    if (active) {
+        irq_hit = false;
         int x, y;
-        if (!read_point(&x, &y)) return TG_NONE;
-        if (!tracking) {
-            tracking = true;
-            start_x = cur_x = x;
-            start_y = cur_y = y;
-        } else {
+        if (read_point(&x, &y)) {
+            if (!tracking) {
+                tracking = true;
+                start_x = x;
+                start_y = y;
+            }
             cur_x = x;
             cur_y = y;
+            last_ms = millis();
         }
         return TG_NONE;                 /* decide on release */
     }
 
     if (!tracking) return TG_NONE;
+    if (millis() - last_ms < TOUCH_IDLE_MS) return TG_NONE;   /* still down */
     tracking = false;
 
     int dx = cur_x - start_x;

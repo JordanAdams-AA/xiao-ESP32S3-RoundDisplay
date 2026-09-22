@@ -16,6 +16,19 @@
 #define SCREEN_W 240
 #define SCREEN_H 240
 
+/* Display SPI clock. The GFX library defaults to 40 MHz on ESP32; the GC9A01
+ * on this board runs happily at 80, which halves the time spent pushing a
+ * frame. Drop back to 40000000 if the screen ever shows tearing or noise. */
+#define GFX_SPI_HZ 80000000
+
+/* Height in lines of the LVGL render buffer. Every hand is a full-width line
+ * object, so LVGL invalidates the whole screen each tick; a taller buffer
+ * means fewer flush calls for that same repaint. 240x80x2 = 38 KB. */
+#define LVBUF_LINES 80
+
+/* Log render timing every N seconds (0 disables). */
+#define PERF_LOG_SECONDS 30
+
 /* Capacitive touch (CHSC6X) on the Round Display's I2C bus.
  * D4/D5 are the XIAO's hardware I2C pins (GPIO5/GPIO6).
  *
