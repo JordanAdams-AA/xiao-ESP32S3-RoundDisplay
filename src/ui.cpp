@@ -14,6 +14,8 @@
 #define COL_BLACK    lv_color_black()
 #define COL_BLUE     lv_color_hex(0x2E9BE6)   /* humidity indicator */
 
+#define DEG_C "\xC2\xB0" "C"   /* U+00B0 + C; split so the C is not swallowed by the hex escape */
+
 /* Temperature ramp. 0 / 20 / 30 are the anchors that were asked for; the
  * green stop at 10 exists because lerping light blue straight to orange
  * passes through a muddy khaki around the midpoint. */
@@ -271,6 +273,7 @@ static lv_obj_t *make_readout(lv_obj_t *parent, int dx, int dy, uint8_t *buf,
                               const icon_pt_t *pts, int npts,
                               lv_color_t icon_col,
                               const lv_font_t *font_int, const lv_font_t *font_dec,
+                              const char *unit,
                               lv_obj_t **icon_out,
                               lv_obj_t **int_out, lv_obj_t **dec_out)
 {
@@ -279,26 +282,48 @@ static lv_obj_t *make_readout(lv_obj_t *parent, int dx, int dy, uint8_t *buf,
     lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
-    /* Cross-axis END bottom-aligns them, so the small decimal sits on the
-     * same baseline as the big number instead of floating mid-height. */
+    /* Cross-axis END lines up the child boxes. That is not the same as
+     * lining up the glyphs: a font's box extends below its baseline by the
+     * descent, and the descent differs per size, so the icon and the two
+     * text sizes each sat at a different visual level. The per-child padding
+     * below corrects for that. */
     lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(box, 3, 0);
     lv_obj_align(box, LV_ALIGN_CENTER, dx, dy);
 
+    const lv_font_t *font_unit = font_dec;
+    lv_coord_t base_max = font_int->base_line;
+    if (font_dec->base_line  > base_max) base_max = font_dec->base_line;
+    if (font_unit->base_line > base_max) base_max = font_unit->base_line;
+
+    /* Padding a label by (base_max - its own descent) puts every baseline at
+     * the same height; lifting the icon by base_max drops its bottom edge
+     * onto that shared baseline. */
     *icon_out = make_icon(box, buf, pts, npts, icon_col);
+    lv_obj_set_style_translate_y(*icon_out, (lv_coord_t)-base_max, 0);
 
     lv_obj_t *i = lv_label_create(box);
     lv_obj_set_style_text_color(i, COL_WHITE, 0);
     lv_obj_set_style_text_font(i, font_int, 0);
+    lv_obj_set_style_pad_bottom(i, base_max - font_int->base_line, 0);
     lv_label_set_text(i, "--");
     *int_out = i;
 
     lv_obj_t *d = lv_label_create(box);
     lv_obj_set_style_text_color(d, COL_GRAY, 0);
     lv_obj_set_style_text_font(d, font_dec, 0);
+    lv_obj_set_style_pad_bottom(d, base_max - font_dec->base_line, 0);
     lv_label_set_text(d, "");
     *dec_out = d;
+
+    if (unit) {
+        lv_obj_t *u = lv_label_create(box);
+        lv_obj_set_style_text_color(u, COL_GRAY, 0);
+        lv_obj_set_style_text_font(u, font_unit, 0);
+        lv_obj_set_style_pad_bottom(u, base_max - font_unit->base_line, 0);
+        lv_label_set_text(u, unit);
+    }
 
     return box;
 }
@@ -423,11 +448,11 @@ static void build_watch_page(lv_obj_t *parent)
     box_ft = make_readout(parent, -46, 0, icon_fire_buf, FLAME_PTS,
                           (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])),
                           COL_T_COLD, &lv_font_montserrat_16, &lv_font_montserrat_12,
-                          &icon_fire, &lbl_ft_int, &lbl_ft_dec);
+                          NULL, &icon_fire, &lbl_ft_int, &lbl_ft_dec);
     box_fh = make_readout(parent,  46, 0, icon_drop_buf, DROP_PTS,
                           (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])),
                           COL_BLUE, &lv_font_montserrat_16, &lv_font_montserrat_12,
-                          &icon_drop, &lbl_fh_int, &lbl_fh_dec);
+                          NULL, &icon_drop, &lbl_fh_int, &lbl_fh_dec);
     /* Nothing is known at boot, so start hidden rather than showing "--". */
     lv_obj_add_flag(box_ft, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(box_fh, LV_OBJ_FLAG_HIDDEN);
@@ -461,7 +486,7 @@ static void build_climate_page(lv_obj_t *parent)
     box_ct = make_readout(parent, 0, -66, icon_fire_buf, FLAME_PTS,
                           (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])),
                           COL_T_COLD, &lv_font_montserrat_24, &lv_font_montserrat_14,
-                          &icon_fire2, &lbl_ct_int, &lbl_ct_dec);
+                          DEG_C, &icon_fire2, &lbl_ct_int, &lbl_ct_dec);
 
     lbl_clim_time = lv_label_create(parent);
     lv_obj_set_style_text_color(lbl_clim_time, COL_GREEN, 0);
@@ -472,7 +497,7 @@ static void build_climate_page(lv_obj_t *parent)
     box_ch = make_readout(parent, 0, 66, icon_drop_buf, DROP_PTS,
                           (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])),
                           COL_BLUE, &lv_font_montserrat_24, &lv_font_montserrat_14,
-                          &icon_drop2, &lbl_ch_int, &lbl_ch_dec);
+                          "%", &icon_drop2, &lbl_ch_int, &lbl_ch_dec);
 
     /* Shown only when both rows are hidden: an otherwise bare page looks
      * like a fault rather than a deliberate "nothing to report". */
