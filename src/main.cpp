@@ -336,7 +336,23 @@ static void mqtt_service()
 /* ---------------- HTTP status page + OTA ---------------- */
 static void handle_root()
 {
-    char html[512];
+    char html[640];
+
+    /* Age of each reading and the MQTT link state: this is what distinguishes
+     * "broker gone" from "sensor simply has not changed", which look identical
+     * on the face because both hide the row. */
+    char agebuf[72] = "unknown";
+    if (xSemaphoreTake(pending_mux, pdMS_TO_TICKS(20)) == pdTRUE) {
+        uint32_t tms = pending.temp_ms, hms = pending.hum_ms;
+        bool up = pending.link;
+        xSemaphoreGive(pending_mux);
+        uint32_t nowms = millis();
+        snprintf(agebuf, sizeof(agebuf),
+                 "link %s, temp %lus ago, hum %lus ago",
+                 up ? "up" : "DOWN",
+                 tms ? (unsigned long)((nowms - tms) / 1000) : 0UL,
+                 hms ? (unsigned long)((nowms - hms) / 1000) : 0UL);
+    }
     char nowbuf[32] = "not set";
     time_t now = time(nullptr);
     if (now > TIME_SANE_EPOCH) {
@@ -349,11 +365,12 @@ static void handle_root()
              "<h2>XIAO watch face</h2>"
              "<p>Local: %s (UTC%+d)<br>IP: %s<br>RSSI: %d dBm<br>"
              "Free heap: %u<br>Uptime: %lus</p>"
+             "<p>MQTT: %s</p>"
              "<p><a href='/update'>Firmware update (OTA)</a></p>"
              "</body></html>",
              nowbuf, utc_offset,
              WiFi.localIP().toString().c_str(), WiFi.RSSI(),
-             (unsigned)ESP.getFreeHeap(), millis() / 1000);
+             (unsigned)ESP.getFreeHeap(), millis() / 1000, agebuf);
     server.send(200, "text/html", html);
 }
 

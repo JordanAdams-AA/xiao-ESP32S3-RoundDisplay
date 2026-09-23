@@ -89,11 +89,18 @@
 #define BL_NIGHT 60          /* 0-255 backlight duty by night */
 
 /* Hide the climate read-outs once the newest value is this old, even while
- * MQTT is still up: a sensor that has gone quiet is no more available than a
- * broken link. HA's statestream only publishes on change and does not retain,
- * so keep this comfortably longer than the sensor's quietest period.
- * 0 disables the staleness check and relies on the MQTT link alone. */
-#define CLIMATE_STALE_SECONDS 1800
+ * MQTT is still up.
+ *
+ * This is a backstop for a sensor that has died without saying so, NOT a
+ * freshness requirement. A sensor that publishes only on change is legitimately
+ * silent for hours in a stable room: at 30 minutes this hid live readings and
+ * looked exactly like a dropped MQTT connection. The real failure modes are
+ * already covered -- a lost link hides the rows, and Home Assistant publishes
+ * "unavailable" when a sensor drops -- so this only needs to catch the case
+ * where neither of those fires. Hours, not minutes.
+ *
+ * 0 disables the check and relies on the MQTT link alone. */
+#define CLIMATE_STALE_SECONDS 21600      /* 6 hours */
 
 /* Set to 1 to show fixed dummy values without any MQTT (useful for a first
  * flash to check the face renders). This also bypasses the availability
