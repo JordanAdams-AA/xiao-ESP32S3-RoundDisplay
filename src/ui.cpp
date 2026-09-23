@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_heap_caps.h"
+#include <Arduino.h>
 
 /* ---- Palette (matches the reference: green accent on black) ---- */
 #define COL_GREEN    lv_color_hex(0x7ED321)
@@ -57,6 +58,22 @@ static lv_obj_t *hand_hour, *hand_min, *hand_sec;
 static lv_point_t pts_hour[2], pts_min[2], pts_sec[2];
 static lv_obj_t *lbl_time, *lbl_wday;
 static lv_obj_t *lbl_day,  *lbl_month;
+
+/* Face read-outs: icon + whole number + a smaller decimal, so the value
+ * stays legible without eating the space either side of the hub. */
+#define ICON_W 15
+#define ICON_H 19
+static lv_obj_t *icon_fire, *icon_drop;
+static lv_obj_t *lbl_ft_int, *lbl_ft_dec;   /* face temperature */
+static lv_obj_t *lbl_fh_int, *lbl_fh_dec;   /* face humidity    */
+/* TRUE_COLOR, not TRUE_COLOR_ALPHA: LVGL only supports drawing onto an
+ * alpha canvas at 32-bit colour depth, and this build is 16-bit. The page
+ * behind is black anyway, so an opaque black backdrop is indistinguishable
+ * from transparency here. */
+static uint8_t   icon_fire_buf[LV_CANVAS_BUF_SIZE_TRUE_COLOR(ICON_W, ICON_H)];
+static uint8_t   icon_drop_buf[LV_CANVAS_BUF_SIZE_TRUE_COLOR(ICON_W, ICON_H)];
+static lv_color_t fire_col_now;
+static bool       fire_col_valid = false;
 
 /* ---- Page 1: climate ---- */
 static lv_obj_t *arc_temp, *lbl_temp;
@@ -125,6 +142,127 @@ static void draw_background(lv_obj_t *parent)
         snprintf(s, sizeof(s), "%02d", k * 5);
         lv_canvas_draw_text(canvas, x - 14, y - 9, 28, &tl, s);
     }
+}
+
+/* ---------------------------------------------------------------------
+ * Icons. LVGL ships a droplet (LV_SYMBOL_TINT) but no flame, so both are
+ * drawn as polygons instead -- mixing a font glyph with a drawn shape
+ * would read as two different styles sitting side by side.
+ * Coordinates are in a 15x19 box; the flame has three tongues so it is not
+ * mistaken for the droplet at this size. */
+static const lv_point_t FLAME_PTS[] = {
+    {7, 0}, {9, 5}, {11, 2}, {12, 8}, {14, 12},
+    {11, 18}, {4, 18}, {1, 12}, {3, 7}, {4, 2}, {6, 5},
+};
+static const lv_point_t DROP_PTS[] = {
+    {7, 0}, {9, 5}, {12, 10}, {12, 14}, {9, 18},
+    {5, 18}, {2, 14}, {2, 10}, {5, 5},
+};
+
+/* Scanline fill straight into the canvas buffer.
+ *
+ * lv_canvas_draw_polygon() hangs on these outlines: LVGL's software polygon
+ * renderer is built for convex shapes, and the flame's tongues are concave.
+ * An even-odd scanline fill handles concavity correctly, and writing the
+ * pixels directly is far cheaper than LVGL's mask machinery for a 15x19 icon.
+ */
+static void draw_icon(uint8_t *buf, lv_obj_t *canvas,
+                      const lv_point_t *p, int n, lv_color_t col)
+{
+    lv_color_t *px = (lv_color_t *)buf;
+    memset(buf, 0, (size_t)ICON_W * ICON_H * sizeof(lv_color_t));  /* black */
+
+    for (int y = 0; y < ICON_H; y++) {
+        float xs[16];
+        int   cnt = 0;
+        float fy  = (float)y + 0.5f;        /* sample at pixel centres */
+
+        for (int i = 0; i < n && cnt < 16; i++) {
+            const lv_point_t *a = &p[i];
+            const lv_point_t *b = &p[(i + 1) % n];
+            if (a->y == b->y) continue;     /* horizontal edges add nothing */
+            /* Half-open test so a vertex shared by two edges counts once. */
+            if ((fy >= a->y && fy < b->y) || (fy >= b->y && fy < a->y)) {
+                float t = (fy - (float)a->y) / (float)(b->y - a->y);
+                xs[cnt++] = (float)a->x + t * (float)(b->x - a->x);
+            }
+        }
+
+        for (int i = 1; i < cnt; i++) {     /* insertion sort, cnt is tiny */
+            float k = xs[i];
+            int   j = i - 1;
+            while (j >= 0 && xs[j] > k) { xs[j + 1] = xs[j]; j--; }
+            xs[j + 1] = k;
+        }
+
+        for (int i = 0; i + 1 < cnt; i += 2) {
+            int x0 = (int)ceilf(xs[i] - 0.5f);
+            int x1 = (int)floorf(xs[i + 1] - 0.5f);
+            if (x0 < 0) x0 = 0;
+            if (x1 > ICON_W - 1) x1 = ICON_W - 1;
+            for (int x = x0; x <= x1; x++) px[y * ICON_W + x] = col;
+        }
+    }
+    lv_obj_invalidate(canvas);
+}
+
+static lv_obj_t *make_icon(lv_obj_t *parent, uint8_t *buf,
+                           const lv_point_t *pts, int n, lv_color_t col)
+{
+    lv_obj_t *c = lv_canvas_create(parent);
+    lv_canvas_set_buffer(c, buf, ICON_W, ICON_H, LV_IMG_CF_TRUE_COLOR);
+    draw_icon(buf, c, pts, n, col);
+    return c;
+}
+
+/* icon + "21" + ".5" on one baseline. Flex keeps the group centred on its
+ * anchor however wide the number happens to be. */
+static lv_obj_t *make_readout(lv_obj_t *parent, int dx, uint8_t *buf,
+                              const lv_point_t *pts, int npts,
+                              lv_color_t icon_col,
+                              lv_obj_t **icon_out,
+                              lv_obj_t **int_out, lv_obj_t **dec_out)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
+    /* Cross-axis END bottom-aligns them, so the small decimal sits on the
+     * same baseline as the big number instead of floating mid-height. */
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(box, 2, 0);
+    lv_obj_align(box, LV_ALIGN_CENTER, dx, 0);
+
+    *icon_out = make_icon(box, buf, pts, npts, icon_col);
+
+    lv_obj_t *i = lv_label_create(box);
+    lv_obj_set_style_text_color(i, COL_WHITE, 0);
+    lv_obj_set_style_text_font(i, &lv_font_montserrat_16, 0);
+    lv_label_set_text(i, "--");
+    *int_out = i;
+
+    lv_obj_t *d = lv_label_create(box);
+    lv_obj_set_style_text_color(d, COL_GRAY, 0);
+    lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
+    lv_label_set_text(d, "");
+    *dec_out = d;
+
+    return box;
+}
+
+/* Split for display: "-2.5" becomes "-2" and ".5". Sign is handled before
+ * the split so the integer part does not round the wrong way negative. */
+static void split_value(float v, char *ip, size_t ipn, char *dp, size_t dpn)
+{
+    bool neg = v < 0.0f;
+    float a  = fabsf(v);
+    int   w  = (int)a;
+    int   f  = (int)lroundf((a - (float)w) * 10.0f);
+    if (f >= 10) { w += 1; f = 0; }
+    snprintf(ip, ipn, "%s%d", neg && (w || f) ? "-" : "", w);
+    snprintf(dp, dpn, ".%d", f);
 }
 
 /* --------------------------------------------------------------------- */
@@ -227,6 +365,16 @@ static void build_watch_page(lv_obj_t *parent)
     lv_obj_set_style_text_font(lbl_month, &lv_font_montserrat_12, 0);
     lv_label_set_text(lbl_month, "---");
     lv_obj_align(lbl_month, LV_ALIGN_CENTER, 0, 11);
+
+    /* Read-outs on the 9-3 line: temperature between the "45" marker and the
+     * hub, humidity between the hub and "15". Created before the hands so the
+     * hands sweep over them rather than under. */
+    make_readout(parent, -46, icon_fire_buf, FLAME_PTS,
+                 (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])), COL_T_COLD,
+                 &icon_fire, &lbl_ft_int, &lbl_ft_dec);
+    make_readout(parent,  46, icon_drop_buf, DROP_PTS,
+                 (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])), COL_BLUE,
+                 &icon_drop, &lbl_fh_int, &lbl_fh_dec);
 
     /* Hands on top, then the centre hub */
     hand_hour = make_hand(parent, COL_WHITE, 6, pts_hour);
@@ -504,6 +652,20 @@ static void set_gauge(lv_obj_t *arc, lv_obj_t *lbl, float v, bool valid,
     lv_label_set_text(lbl, s);
 }
 
+/* Face read-out: whole number big, decimal small. */
+static void set_readout(lv_obj_t *ip, lv_obj_t *dp, float v, bool valid)
+{
+    if (!valid) {
+        lv_label_set_text(ip, "--");
+        lv_label_set_text(dp, "");
+        return;
+    }
+    char a[8], b[8];
+    split_value(v, a, sizeof(a), b, sizeof(b));
+    lv_label_set_text(ip, a);
+    lv_label_set_text(dp, b);
+}
+
 void ui_set_temperature(float celsius, bool valid)
 {
     /* Colour follows the reading, so the gauge is legible at a glance even
@@ -511,10 +673,21 @@ void ui_set_temperature(float celsius, bool valid)
     lv_color_t c = valid ? temp_color(celsius) : COL_T_COLD;
     lv_obj_set_style_arc_color(arc_temp, c, LV_PART_INDICATOR);
 
+    /* The flame tracks the same ramp. Redrawn only when the colour actually
+     * changes -- every redraw invalidates the icon and costs a flush. */
+    if (!fire_col_valid || lv_color_to32(c) != lv_color_to32(fire_col_now)) {
+        fire_col_now   = c;
+        fire_col_valid = true;
+        draw_icon(icon_fire_buf, icon_fire, FLAME_PTS,
+                  (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])), c);
+    }
+
+    set_readout(lbl_ft_int, lbl_ft_dec, celsius, valid);
     set_gauge(arc_temp, lbl_temp, celsius, valid, TEMP_MIN, TEMP_MAX);
 }
 
 void ui_set_humidity(float percent, bool valid)
 {
+    set_readout(lbl_fh_int, lbl_fh_dec, percent, valid);
     set_gauge(arc_hum, lbl_hum, percent, valid, HUM_MIN, HUM_MAX);
 }
