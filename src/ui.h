@@ -15,11 +15,21 @@ void ui_create(void);
  *
  *        (0,0) watch  <-->  (1,0) climate
  *          |
- *        (0,1) settings
+ *        (0,1) display    (rotation)
+ *          |
+ *        (0,2) set time   (hours/minutes)
+ *          |
+ *        (0,3) time zone  (UTC offset)
+ *
+ * The settings live on their own pages rather than crowded onto one: a
+ * 240px round screen cannot hold three controls and still leave touch
+ * targets big enough to hit.
  */
 #define UI_PAGE_WATCH    0
 #define UI_PAGE_CLIMATE  1
 #define UI_PAGE_SETTINGS 2
+#define UI_PAGE_SETTIME  3
+#define UI_PAGE_TZ       4
 
 /* Move by one grid step. Ignored when there is no tile in that direction,
  * so the face never scrolls to an empty cell. */
@@ -33,6 +43,17 @@ typedef void (*ui_rotate_cb_t)(uint8_t rotation);
 void    ui_set_rotate_handler(ui_rotate_cb_t cb);
 void    ui_set_rotation(uint8_t rotation);
 uint8_t ui_get_rotation(void);
+
+/* Manual clock setting. The arrows shift the clock itself rather than
+ * editing a scratch value, so the page always shows the real time and
+ * there is nothing to confirm. Deltas are in minutes. */
+typedef void (*ui_time_adjust_cb_t)(int delta_minutes);
+void ui_set_time_adjust_handler(ui_time_adjust_cb_t cb);
+
+/* UTC offset in whole hours. */
+typedef void (*ui_tz_adjust_cb_t)(int delta_hours);
+void ui_set_tz_adjust_handler(ui_tz_adjust_cb_t cb);
+void ui_set_tz_offset(int hours);      /* refresh the label */
 
 /* Update the clock. Call once per second: the second hand ticks in discrete
  * 6-degree steps rather than sweeping. wday: 0=Sunday..6=Saturday ;

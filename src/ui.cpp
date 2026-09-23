@@ -53,6 +53,12 @@ static lv_obj_t *lbl_rot_value;
 static uint8_t   rotation = 0;
 static ui_rotate_cb_t rotate_cb = NULL;
 
+static lv_obj_t *tile_settime, *tile_tz;
+static lv_obj_t *lbl_settime, *lbl_tz_value;
+static int       tz_offset = 0;
+static ui_time_adjust_cb_t time_adj_cb = NULL;
+static ui_tz_adjust_cb_t   tz_adj_cb   = NULL;
+
 /* ---- Page 0: watch ---- */
 static lv_obj_t *hand_hour, *hand_min, *hand_sec;
 static lv_point_t pts_hour[2], pts_min[2], pts_sec[2];
@@ -560,6 +566,112 @@ void ui_set_rotation(uint8_t r)
 }
 
 /* --------------------------------------------------------------------- */
+/* Arrow buttons. 46x40 is deliberately larger than the glyph: these are the
+ * only controls on the watch that must be hit accurately with a fingertip. */
+static lv_obj_t *make_arrow(lv_obj_t *parent, const char *sym, int x, int y,
+                            lv_event_cb_t cb, void *user)
+{
+    lv_obj_t *b = lv_btn_create(parent);
+    lv_obj_set_size(b, 46, 40);
+    lv_obj_align(b, LV_ALIGN_CENTER, x, y);
+    lv_obj_set_style_radius(b, 8, 0);
+    lv_obj_set_style_bg_color(b, COL_DARKGRAY, 0);
+    lv_obj_set_style_border_color(b, COL_GREEN, 0);
+    lv_obj_set_style_border_width(b, 2, 0);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
+
+    lv_obj_t *l = lv_label_create(b);
+    lv_obj_set_style_text_color(l, COL_WHITE, 0);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+    lv_label_set_text(l, sym);
+    lv_obj_center(l);
+    return b;
+}
+
+static lv_obj_t *make_page_title(lv_obj_t *parent, const char *txt)
+{
+    lv_obj_t *t = lv_label_create(parent);
+    lv_obj_set_style_text_color(t, COL_GRAY, 0);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
+    lv_label_set_text(t, txt);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 34);
+    return t;
+}
+
+static void make_page_hint(lv_obj_t *parent, const char *txt)
+{
+    lv_obj_t *h = lv_label_create(parent);
+    lv_obj_set_style_text_color(h, COL_GRAY, 0);
+    lv_obj_set_style_text_font(h, &lv_font_montserrat_12, 0);
+    lv_label_set_text(h, txt);
+    lv_obj_align(h, LV_ALIGN_BOTTOM_MID, 0, -30);
+}
+
+static void time_adj_event(lv_event_t *e)
+{
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    if (time_adj_cb) time_adj_cb(delta);
+}
+
+static void build_settime_page(lv_obj_t *parent)
+{
+    lv_obj_set_style_bg_color(parent, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
+    make_page_title(parent, "SET TIME");
+
+    /* Columns line up with the hour and minute halves of "00:00" at
+     * montserrat_28, so each arrow sits over the field it changes. */
+    const int HX = -22, MX = 22;
+    make_arrow(parent, LV_SYMBOL_UP,   HX, -44, time_adj_event, (void *)(intptr_t) 60);
+    make_arrow(parent, LV_SYMBOL_UP,   MX, -44, time_adj_event, (void *)(intptr_t)  1);
+    make_arrow(parent, LV_SYMBOL_DOWN, HX,  44, time_adj_event, (void *)(intptr_t)-60);
+    make_arrow(parent, LV_SYMBOL_DOWN, MX,  44, time_adj_event, (void *)(intptr_t) -1);
+
+    lbl_settime = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl_settime, COL_GREEN, 0);
+    lv_obj_set_style_text_font(lbl_settime, &lv_font_montserrat_28, 0);
+    lv_label_set_text(lbl_settime, "--:--");
+    lv_obj_align(lbl_settime, LV_ALIGN_CENTER, 0, 0);
+
+    make_page_hint(parent, "NTP will override");
+}
+
+static void tz_adj_event(lv_event_t *e)
+{
+    int delta = (int)(intptr_t)lv_event_get_user_data(e);
+    if (tz_adj_cb) tz_adj_cb(delta);
+}
+
+static void build_tz_page(lv_obj_t *parent)
+{
+    lv_obj_set_style_bg_color(parent, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
+    make_page_title(parent, "TIME ZONE");
+
+    make_arrow(parent, LV_SYMBOL_UP,   0, -44, tz_adj_event, (void *)(intptr_t) 1);
+    make_arrow(parent, LV_SYMBOL_DOWN, 0,  44, tz_adj_event, (void *)(intptr_t)-1);
+
+    lbl_tz_value = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl_tz_value, COL_GREEN, 0);
+    lv_obj_set_style_text_font(lbl_tz_value, &lv_font_montserrat_28, 0);
+    lv_label_set_text(lbl_tz_value, "UTC+0");
+    lv_obj_align(lbl_tz_value, LV_ALIGN_CENTER, 0, 0);
+
+    make_page_hint(parent, "fixed offset, no DST");
+}
+
+void ui_set_time_adjust_handler(ui_time_adjust_cb_t cb) { time_adj_cb = cb; }
+void ui_set_tz_adjust_handler(ui_tz_adjust_cb_t cb)     { tz_adj_cb = cb; }
+
+void ui_set_tz_offset(int hours)
+{
+    tz_offset = hours;
+    char s[16];
+    snprintf(s, sizeof(s), "UTC%+d", hours);
+    lv_label_set_text(lbl_tz_value, s);
+}
+
+/* --------------------------------------------------------------------- */
 void ui_create(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -579,9 +691,12 @@ void ui_create(void)
     tile_watch    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_NONE);
     tile_climate  = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_NONE);
     tile_settings = lv_tileview_add_tile(tileview, 0, 1, LV_DIR_NONE);
+    tile_settime  = lv_tileview_add_tile(tileview, 0, 2, LV_DIR_NONE);
+    tile_tz       = lv_tileview_add_tile(tileview, 0, 3, LV_DIR_NONE);
 
-    lv_obj_t *tiles[3] = { tile_watch, tile_climate, tile_settings };
-    for (int i = 0; i < 3; i++) {
+    lv_obj_t *tiles[5] = { tile_watch, tile_climate, tile_settings,
+                           tile_settime, tile_tz };
+    for (int i = 0; i < 5; i++) {
         lv_obj_set_style_pad_all(tiles[i], 0, 0);
         lv_obj_set_style_border_width(tiles[i], 0, 0);
         lv_obj_set_scrollbar_mode(tiles[i], LV_SCROLLBAR_MODE_OFF);
@@ -591,6 +706,8 @@ void ui_create(void)
     build_watch_page(tile_watch);
     build_climate_page(tile_climate);
     build_settings_page(tile_settings);
+    build_settime_page(tile_settime);
+    build_tz_page(tile_tz);
 
     cur_col = cur_row = 0;
     lv_obj_set_tile_id(tileview, 0, 0, LV_ANIM_OFF);
@@ -603,7 +720,7 @@ static bool cell_exists(int col, int row)
 {
     return (col == 0 && row == 0) ||   /* watch    */
            (col == 1 && row == 0) ||   /* climate  */
-           (col == 0 && row == 1);     /* settings */
+           (col == 0 && row >= 1 && row <= 3);  /* settings stack */
 }
 
 void ui_nav(int dcol, int drow)
@@ -619,7 +736,7 @@ void ui_nav(int dcol, int drow)
 
 int ui_page_get(void)
 {
-    if (cur_row == 1) return UI_PAGE_SETTINGS;
+    if (cur_row >= 1) return UI_PAGE_SETTINGS + (cur_row - 1);
     return cur_col == 1 ? UI_PAGE_CLIMATE : UI_PAGE_WATCH;
 }
 
@@ -643,6 +760,7 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
             showing_unknown = true;
             lv_label_set_text(lbl_time,      "--:--");
             lv_label_set_text(lbl_clim_time, "--:--");
+            lv_label_set_text(lbl_settime,   "--:--");
             lv_label_set_text(lbl_wday,      "syncing");
             lv_label_set_text(lbl_day,       "--");
             lv_label_set_text(lbl_month,     "---");
@@ -667,6 +785,9 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
         snprintf(t, sizeof(t), "%02d:%02d", hour, minute);
         lv_label_set_text(lbl_time, t);
         lv_label_set_text(lbl_clim_time, t);
+        /* The set-time page shows the live clock, so the arrows move the
+         * real thing and there is no scratch value to apply. */
+        lv_label_set_text(lbl_settime, t);
     }
 
     if (wday != last_wday && wday >= 0 && wday < 7) {

@@ -32,14 +32,20 @@
 #include <Arduino_GFX_Library.h>
 #include "esp_heap_caps.h"
 #include "esp_task_wdt.h"
+#include "esp_sntp.h"
 
 #include "config.h"
 #include "secrets.h"
 #include "ui.h"
 #include "touch.h"
+#include "rtc.h"
 
 #define UI_CORE   1
 #define NET_CORE  0
+
+/* Defined with the rest of the time handling further down, but needed by
+ * update_clock() above it. */
+static bool time_is_believable(void);
 
 /* ---------------- Display ---------------- */
 static Arduino_DataBus *bus =
@@ -345,7 +351,9 @@ static void update_clock()
     time_t now = time(nullptr);
     struct tm ti;
     localtime_r(&now, &ti);
-    bool synced = (ti.tm_year > (2016 - 1900));
+    /* Believable means seeded from the RTC or corrected by NTP; an unset
+     * clock reads 1970 and must not be shown as if it were the time. */
+    bool synced = time_is_believable();
 
     /* One discrete tick per second. Redrawing only on a second boundary is
      * both the look that was asked for and far less work than the old ~20 Hz
@@ -366,13 +374,116 @@ static void update_clock()
     if (want != lastDim) { backlight_set((uint8_t)want); lastDim = want; }
 }
 
+static Preferences prefs;
+
+/* ---------------- Time ----------------
+ * The RTC is the clock of record. It is read once at boot, so the watch knows
+ * the time with no network at all, and the system clock is realigned to it
+ * periodically. NTP only corrects: each successful sync is written back to
+ * the RTC, which is also what repairs a drifting or freshly-batteried chip.
+ *
+ * The RTC always holds UTC. Local time is applied through the TZ offset, so
+ * changing time zone never rewrites the chip.
+ *
+ * All RTC access happens on ui_task, which already owns the I2C bus for the
+ * touch controller -- that avoids a second lock on a shared bus. */
+static int  utc_offset   = DEFAULT_UTC_OFFSET_HOURS;
+static volatile bool ntp_fresh = false;   /* a sync landed, write it to RTC */
+
+/* Anything older than this is not a real time; used to decide whether the
+ * clock is believable and what a manual adjustment should start from. */
+#define TIME_SANE_EPOCH 1767225600L       /* 2026-01-01T00:00:00Z */
+
+/* timegm() is not exposed by this newlib build, and mktime() would apply the
+ * local offset -- wrong for a chip that stores UTC. Days-from-civil instead
+ * (Howard Hinnant's algorithm), which is exact and has no timezone state. */
+static time_t utc_from_tm(const struct tm *t)
+{
+    int      y = t->tm_year + 1900;
+    unsigned m = (unsigned)t->tm_mon + 1;
+    unsigned d = (unsigned)t->tm_mday;
+    y -= (m <= 2);
+    const int      era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    long days = (long)era * 146097L + (long)doe - 719468L;
+    return (time_t)days * 86400L
+         + (time_t)t->tm_hour * 3600 + (time_t)t->tm_min * 60 + t->tm_sec;
+}
+
+static bool time_is_believable(void)
+{
+    return time(nullptr) > TIME_SANE_EPOCH;
+}
+
+static void apply_timezone(int off)
+{
+    if (off < UTC_OFFSET_MIN) off = UTC_OFFSET_MIN;
+    if (off > UTC_OFFSET_MAX) off = UTC_OFFSET_MAX;
+    utc_offset = off;
+
+    /* POSIX TZ counts the other way round: UTC+1 is written "UTC-1". */
+    char tz[16];
+    snprintf(tz, sizeof(tz), "UTC%+d", -off);
+    setenv("TZ", tz, 1);
+    tzset();
+
+    prefs.begin("watchface", false);
+    if (prefs.getChar("tz", 127) != (int8_t)off) prefs.putChar("tz", (int8_t)off);
+    prefs.end();
+
+    Serial.printf("time: offset UTC%+d (TZ=%s)\n", off, tz);
+}
+
+/* SNTP task context: do nothing here but raise a flag. */
+static void on_ntp_sync(struct timeval *tv)
+{
+    LV_UNUSED(tv);
+    ntp_fresh = true;
+}
+
+/* ui_task only: push the freshly synced system clock into the RTC. */
+static void rtc_store_now(const char *why)
+{
+    if (!rtc_present()) return;
+    time_t now = time(nullptr);
+    if (now <= TIME_SANE_EPOCH) return;
+    struct tm utc;
+    gmtime_r(&now, &utc);
+    if (rtc_write(&utc))
+        Serial.printf("rtc: written from %s (%04d-%02d-%02d %02d:%02d:%02d UTC)\n",
+                      why, utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                      utc.tm_hour, utc.tm_min, utc.tm_sec);
+    else
+        Serial.println("rtc: write FAILED");
+}
+
+/* Shift the clock by whole minutes and persist it. Starts from a sane date
+ * when the clock has never been set, so the arrows are usable on a board
+ * with no network and no RTC battery. */
+static void time_adjust(int delta_minutes)
+{
+    time_t now = time(nullptr);
+    if (now <= TIME_SANE_EPOCH) now = TIME_SANE_EPOCH;
+    now += (time_t)delta_minutes * 60;
+
+    struct timeval tv = { .tv_sec = now, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    rtc_store_now("manual set");
+}
+
+static void tz_adjust(int delta_hours)
+{
+    apply_timezone(utc_offset + delta_hours);
+    ui_set_tz_offset(utc_offset);
+}
+
 /* ---------------- Rotation ----------------
  * Turning the panel is done in the GC9A01's scan mapping, not by rotating
  * pixels in software: it costs nothing per frame. The screen is square, so
  * LVGL's resolution is unchanged. The choice is kept in NVS because it
  * describes how the device is physically mounted. */
-static Preferences prefs;
-
 static void apply_rotation(uint8_t r)
 {
     gfx->setRotation(r);
@@ -429,6 +540,33 @@ static void service_pages()
     }
 }
 
+/* ui_task only: owns the I2C bus, so all RTC traffic lives here. */
+static void service_rtc(void)
+{
+    if (ntp_fresh) {
+        ntp_fresh = false;
+        rtc_store_now("ntp");
+        return;
+    }
+
+    /* Between NTP syncs, realign the system clock to the RTC: the chip's
+     * watch crystal holds time better than the ESP32 running free, and this
+     * is what makes the RTC the authority rather than a mere backup. */
+    static uint32_t last = 0;
+    if (!rtc_present()) return;
+    if (millis() - last < (uint32_t)RTC_RESYNC_SECONDS * 1000UL) return;
+    last = millis();
+
+    struct tm utc;
+    bool valid = false;
+    if (!rtc_read(&utc, &valid) || !valid) return;
+
+    time_t t = utc_from_tm(&utc);
+    if (t <= TIME_SANE_EPOCH) return;
+    struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+}
+
 /* ==================================================================== */
 /* Core 1: rendering only. Nothing in here is allowed to block.         */
 static void ui_task(void *)
@@ -460,6 +598,7 @@ static void ui_task(void *)
         pending_drain();
         update_clock();
         service_pages();
+        service_rtc();
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -498,7 +637,12 @@ static void net_task(void *)
         wifi_start();
     }
 
-    configTzTime(TZ_INFO, "pool.ntp.org", "time.cloudflare.com");
+    /* Ask for UTC (offset 0) and apply the local offset through TZ instead,
+     * so the time zone can change at runtime without restarting SNTP. */
+    sntp_set_time_sync_notification_cb(on_ntp_sync);
+    sntp_set_sync_interval((uint32_t)NTP_SYNC_INTERVAL_SECONDS * 1000UL);
+    configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+    apply_timezone(utc_offset);
 
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     mqtt.setCallback(mqtt_cb);
@@ -584,9 +728,37 @@ void setup()
     /* Restore the mounting orientation chosen on the settings page. */
     prefs.begin("watchface", true);
     uint8_t rot = prefs.getUChar("rot", 0);
+    int8_t  tz  = prefs.getChar("tz", (int8_t)DEFAULT_UTC_OFFSET_HOURS);
     prefs.end();
     ui_set_rotate_handler(apply_rotation);
     ui_set_rotation(rot);
+
+    ui_set_time_adjust_handler(time_adjust);
+    ui_set_tz_adjust_handler(tz_adjust);
+    apply_timezone(tz);
+    ui_set_tz_offset(utc_offset);
+
+    /* Seed the system clock from the RTC before anything reads it, so the
+     * face shows a real time immediately even with no network. */
+    if (rtc_init()) {
+        struct tm utc;
+        bool valid = false;
+        if (rtc_read(&utc, &valid)) {
+            if (valid) {
+                time_t t = utc_from_tm(&utc);
+                if (t > TIME_SANE_EPOCH) {
+                    struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+                    settimeofday(&tv, NULL);
+                    Serial.printf("rtc: seeded clock %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                                  utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                                  utc.tm_hour, utc.tm_min, utc.tm_sec);
+                }
+            } else {
+                Serial.println("rtc: voltage-low flag set -- time not trusted "
+                               "(no backup cell yet?)");
+            }
+        }
+    }
 
 #if USE_DUMMY_DATA
     ui_set_temperature(DUMMY_TEMP, true);   /* safe: no tasks running yet */

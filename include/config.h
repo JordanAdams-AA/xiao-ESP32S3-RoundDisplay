@@ -68,8 +68,19 @@
 #define HUM_MIN  0
 #define HUM_MAX  100
 
-/* Timezone (Europe/Brussels, CET/CEST with DST rules) */
-#define TZ_INFO "CET-1CEST,M3.5.0,M10.5.0/3"
+/* Time zone as a fixed offset from UTC, settable on the TIME ZONE page.
+ * This is a plain offset, NOT a DST rule: the displayed time will not jump
+ * on the last Sunday of March or October, so summer time has to be selected
+ * by hand. That is the trade for being able to set it on the device. */
+#define DEFAULT_UTC_OFFSET_HOURS 1     /* Europe/Brussels, winter */
+#define UTC_OFFSET_MIN (-12)
+#define UTC_OFFSET_MAX 14
+
+/* How often SNTP re-checks the network clock, and how often the system clock
+ * is realigned to the RTC between those checks. The RTC is the clock of
+ * record; NTP only corrects it. */
+#define NTP_SYNC_INTERVAL_SECONDS 3600
+#define RTC_RESYNC_SECONDS        600
 
 /* Night dimming */
 #define DIM_START_HOUR 23    /* dim from 23:00 ... */
