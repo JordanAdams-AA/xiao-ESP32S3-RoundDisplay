@@ -79,7 +79,7 @@
 /* How often SNTP re-checks the network clock, and how often the system clock
  * is realigned to the RTC between those checks. The RTC is the clock of
  * record; NTP only corrects it. */
-#define NTP_SYNC_INTERVAL_SECONDS 3600
+#define NTP_SYNC_INTERVAL_SECONDS 900
 #define RTC_RESYNC_SECONDS        600
 
 /* Night dimming */

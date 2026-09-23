@@ -63,7 +63,7 @@ void ui_set_tz_offset(int hours);      /* refresh the label */
  * system clock so the face is alive, but the digital readout shows "--:--"
  * instead of 1970. */
 void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
-                 bool synced);
+                 int year, bool synced);
 
 /* Update complications. valid=false shows "--" and an empty arc. */
 void ui_set_temperature(float celsius, bool valid);

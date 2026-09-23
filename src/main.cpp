@@ -44,8 +44,13 @@
 #define NET_CORE  0
 
 /* Defined with the rest of the time handling further down, but needed by
- * update_clock() above it. */
+ * update_clock() and handle_root() above it. */
 static bool time_is_believable(void);
+
+/* Anything older than this is not a real time; used to decide whether the
+ * clock is believable and what a manual adjustment should start from. */
+#define TIME_SANE_EPOCH 1767225600L       /* 2026-01-01T00:00:00Z */
+static int utc_offset = DEFAULT_UTC_OFFSET_HOURS;
 
 /* ---------------- Display ---------------- */
 static Arduino_DataBus *bus =
@@ -332,12 +337,21 @@ static void mqtt_service()
 static void handle_root()
 {
     char html[512];
+    char nowbuf[32] = "not set";
+    time_t now = time(nullptr);
+    if (now > TIME_SANE_EPOCH) {
+        struct tm lt;
+        localtime_r(&now, &lt);
+        strftime(nowbuf, sizeof(nowbuf), "%Y-%m-%d %H:%M:%S", &lt);
+    }
     snprintf(html, sizeof(html),
              "<html><body style='font-family:sans-serif'>"
              "<h2>XIAO watch face</h2>"
-             "<p>IP: %s<br>RSSI: %d dBm<br>Free heap: %u<br>Uptime: %lus</p>"
+             "<p>Local: %s (UTC%+d)<br>IP: %s<br>RSSI: %d dBm<br>"
+             "Free heap: %u<br>Uptime: %lus</p>"
              "<p><a href='/update'>Firmware update (OTA)</a></p>"
              "</body></html>",
+             nowbuf, utc_offset,
              WiFi.localIP().toString().c_str(), WiFi.RSSI(),
              (unsigned)ESP.getFreeHeap(), millis() / 1000);
     server.send(200, "text/html", html);
@@ -363,7 +377,7 @@ static void update_clock()
     lastSec = ti.tm_sec;
 
     ui_set_time(ti.tm_hour, ti.tm_min, (float)ti.tm_sec,
-                ti.tm_wday, ti.tm_mday, ti.tm_mon, synced);
+                ti.tm_wday, ti.tm_mday, ti.tm_mon, ti.tm_year + 1900, synced);
 
     /* Night dimming */
     static int lastDim = -1;
@@ -387,12 +401,7 @@ static Preferences prefs;
  *
  * All RTC access happens on ui_task, which already owns the I2C bus for the
  * touch controller -- that avoids a second lock on a shared bus. */
-static int  utc_offset   = DEFAULT_UTC_OFFSET_HOURS;
 static volatile bool ntp_fresh = false;   /* a sync landed, write it to RTC */
-
-/* Anything older than this is not a real time; used to decide whether the
- * clock is believable and what a manual adjustment should start from. */
-#define TIME_SANE_EPOCH 1767225600L       /* 2026-01-01T00:00:00Z */
 
 /* timegm() is not exposed by this newlib build, and mktime() would apply the
  * local offset -- wrong for a chip that stores UTC. Days-from-civil instead
@@ -545,7 +554,15 @@ static void service_rtc(void)
 {
     if (ntp_fresh) {
         ntp_fresh = false;
+        /* Compare against what the RTC still holds before overwriting it, so
+         * the log shows whether NTP actually moved anything and by how much. */
+        struct tm before;
+        bool ok = false;
+        long drift = 0;
+        if (rtc_present() && rtc_read(&before, &ok) && ok)
+            drift = (long)(time(nullptr) - utc_from_tm(&before));
         rtc_store_now("ntp");
+        Serial.printf("ntp: sync applied, RTC was off by %ld s\n", drift);
         return;
     }
 

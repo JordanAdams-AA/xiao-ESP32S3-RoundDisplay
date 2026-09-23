@@ -94,7 +94,7 @@ static lv_obj_t *box_ct, *box_ch;
 static lv_obj_t *icon_fire2, *icon_drop2;
 static lv_obj_t *lbl_ct_int, *lbl_ct_dec;
 static lv_obj_t *lbl_ch_int, *lbl_ch_dec;
-static lv_obj_t *lbl_clim_time;
+static lv_obj_t *lbl_clim_time, *lbl_clim_date;
 static lv_obj_t *lbl_clim_nodata;
 
 /* Static background (tick ring + numbers), drawn once onto a canvas in PSRAM */
@@ -104,7 +104,7 @@ static lv_color_t *cbuf = NULL;
  * redraw text that has not changed. Reset when leaving the pre-NTP state:
  * the placeholder labels would otherwise suppress the first real update. */
 static int last_hour = -1, last_min = -1, last_wday = -1,
-           last_mday = -1, last_month = -1;
+           last_mday = -1, last_month = -1, last_year = -1;
 
 /* True while the digital readout shows placeholders instead of a real time. */
 static bool showing_unknown = false;
@@ -113,6 +113,9 @@ static const char *WDAYS[7]  = {"Sunday","Monday","Tuesday","Wednesday",
                                 "Thursday","Friday","Saturday"};
 static const char *MONTHS[12] = {"JAN","FEB","MAR","APR","MAY","JUN",
                                  "JUL","AUG","SEP","OCT","NOV","DEC"};
+static const char *MONTHS_FULL[12] = {"January","February","March","April",
+                                      "May","June","July","August","September",
+                                      "October","November","December"};
 
 /* --------------------------------------------------------------------- */
 static void draw_background(lv_obj_t *parent)
@@ -483,18 +486,34 @@ static void build_climate_page(lv_obj_t *parent)
 
     /* Temperature above, clock in the middle, humidity below. With the arcs
      * gone the clock can run at montserrat_48 and still clear both rows. */
-    box_ct = make_readout(parent, 0, -66, icon_fire_buf, FLAME_PTS,
+    box_ct = make_readout(parent, 0, -74, icon_fire_buf, FLAME_PTS,
                           (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])),
                           COL_T_COLD, &lv_font_montserrat_24, &lv_font_montserrat_14,
                           DEG_C, &icon_fire2, &lbl_ct_int, &lbl_ct_dec);
 
-    lbl_clim_time = lv_label_create(parent);
+    /* Clock and date are one group so the pair is centred together: centring
+     * the clock alone and hanging the date beneath would sit the block low. */
+    lv_obj_t *grp = lv_obj_create(parent);
+    lv_obj_remove_style_all(grp);
+    lv_obj_set_size(grp, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grp, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(grp, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(grp, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(grp, 1, 0);
+    lv_obj_center(grp);
+
+    lbl_clim_time = lv_label_create(grp);
     lv_obj_set_style_text_color(lbl_clim_time, COL_GREEN, 0);
     lv_obj_set_style_text_font(lbl_clim_time, &lv_font_montserrat_48, 0);
     lv_label_set_text(lbl_clim_time, "--:--");
-    lv_obj_align(lbl_clim_time, LV_ALIGN_CENTER, 0, 0);
 
-    box_ch = make_readout(parent, 0, 66, icon_drop_buf, DROP_PTS,
+    lbl_clim_date = lv_label_create(grp);
+    lv_obj_set_style_text_color(lbl_clim_date, COL_GRAY, 0);
+    lv_obj_set_style_text_font(lbl_clim_date, &lv_font_montserrat_16, 0);
+    lv_label_set_text(lbl_clim_date, "");
+
+    box_ch = make_readout(parent, 0, 74, icon_drop_buf, DROP_PTS,
                           (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])),
                           COL_BLUE, &lv_font_montserrat_24, &lv_font_montserrat_14,
                           "%", &icon_drop2, &lbl_ch_int, &lbl_ch_dec);
@@ -505,7 +524,7 @@ static void build_climate_page(lv_obj_t *parent)
     lv_obj_set_style_text_color(lbl_clim_nodata, COL_GRAY, 0);
     lv_obj_set_style_text_font(lbl_clim_nodata, &lv_font_montserrat_14, 0);
     lv_label_set_text(lbl_clim_nodata, "no sensor data");
-    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 66);
+    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 74);
 
     lv_obj_add_flag(box_ct, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(box_ch, LV_OBJ_FLAG_HIDDEN);
@@ -753,7 +772,7 @@ int ui_page_get(void)
 
 /* --------------------------------------------------------------------- */
 void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
-                 bool synced)
+                 int year, bool synced)
 {
     float sa = sec / 60.0f * 360.0f;
     float ma = (minute + sec / 60.0f) / 60.0f * 360.0f;
@@ -772,10 +791,12 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
             lv_label_set_text(lbl_time,      "--:--");
             lv_label_set_text(lbl_clim_time, "--:--");
             lv_label_set_text(lbl_settime,   "--:--");
+            lv_label_set_text(lbl_clim_date, "");
             lv_label_set_text(lbl_wday,      "syncing");
             lv_label_set_text(lbl_day,       "--");
             lv_label_set_text(lbl_month,     "---");
             last_hour = last_min = last_wday = last_mday = last_month = -1;
+            last_year = -1;
         }
         return;
     }
@@ -785,6 +806,7 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
     if (showing_unknown) {
         showing_unknown = false;
         last_hour = last_min = last_wday = last_mday = last_month = -1;
+        last_year = -1;
     }
 
     /* The hands move every second, the text almost never does. Rewriting a
@@ -816,6 +838,15 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
     if (month != last_month && month >= 0 && month < 12) {
         last_month = month;
         lv_label_set_text(lbl_month, MONTHS[month]);
+    }
+
+    /* Written-out date under the climate clock. */
+    if ((mday != last_mday || month != last_month || year != last_year) &&
+        month >= 0 && month < 12) {
+        last_year = year;
+        char dd[32];
+        snprintf(dd, sizeof(dd), "%d %s %d", mday, MONTHS_FULL[month], year);
+        lv_label_set_text(lbl_clim_date, dd);
     }
 }
 
