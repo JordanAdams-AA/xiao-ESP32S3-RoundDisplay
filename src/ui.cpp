@@ -84,8 +84,14 @@ static lv_color_t fire_col_now;
 static bool       fire_col_valid = false;
 
 /* ---- Page 1: climate ---- */
-static lv_obj_t *arc_temp, *lbl_temp;
-static lv_obj_t *arc_hum,  *lbl_hum;
+/* Same read-out style as the watch face: an icon reads better at this size
+ * than a 66px arc did, and dropping the dials frees the height for the
+ * clock. The icon buffers are shared with the watch page -- one rasterised
+ * flame, two canvases showing it. */
+static lv_obj_t *box_ct, *box_ch;
+static lv_obj_t *icon_fire2, *icon_drop2;
+static lv_obj_t *lbl_ct_int, *lbl_ct_dec;
+static lv_obj_t *lbl_ch_int, *lbl_ch_dec;
 static lv_obj_t *lbl_clim_time;
 static lv_obj_t *lbl_clim_nodata;
 
@@ -193,8 +199,7 @@ static const icon_pt_t DROP_PTS[] = {
     { 4.2f, 10.0f}, { 5.8f,  7.0f}, { 7.4f,  4.0f},
 };
 
-static void draw_icon(uint8_t *buf, lv_obj_t *canvas,
-                      const icon_pt_t *p, int n, lv_color_t col)
+static void draw_icon(uint8_t *buf, const icon_pt_t *p, int n, lv_color_t col)
 {
     lv_color_t *px = (lv_color_t *)buf;
     memset(buf, 0, (size_t)ICON_W * ICON_H * sizeof(lv_color_t));  /* black */
@@ -249,7 +254,6 @@ static void draw_icon(uint8_t *buf, lv_obj_t *canvas,
             px[y * ICON_W + x] = (mix >= 255) ? col : lv_color_mix(col, bg, mix);
         }
     }
-    lv_obj_invalidate(canvas);
 }
 
 static lv_obj_t *make_icon(lv_obj_t *parent, uint8_t *buf,
@@ -257,15 +261,16 @@ static lv_obj_t *make_icon(lv_obj_t *parent, uint8_t *buf,
 {
     lv_obj_t *c = lv_canvas_create(parent);
     lv_canvas_set_buffer(c, buf, ICON_W, ICON_H, LV_IMG_CF_TRUE_COLOR);
-    draw_icon(buf, c, pts, n, col);
+    draw_icon(buf, pts, n, col);
     return c;
 }
 
 /* icon + "21" + ".5" on one baseline. Flex keeps the group centred on its
  * anchor however wide the number happens to be. */
-static lv_obj_t *make_readout(lv_obj_t *parent, int dx, uint8_t *buf,
+static lv_obj_t *make_readout(lv_obj_t *parent, int dx, int dy, uint8_t *buf,
                               const icon_pt_t *pts, int npts,
                               lv_color_t icon_col,
+                              const lv_font_t *font_int, const lv_font_t *font_dec,
                               lv_obj_t **icon_out,
                               lv_obj_t **int_out, lv_obj_t **dec_out)
 {
@@ -278,20 +283,20 @@ static lv_obj_t *make_readout(lv_obj_t *parent, int dx, uint8_t *buf,
      * same baseline as the big number instead of floating mid-height. */
     lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(box, 2, 0);
-    lv_obj_align(box, LV_ALIGN_CENTER, dx, 0);
+    lv_obj_set_style_pad_column(box, 3, 0);
+    lv_obj_align(box, LV_ALIGN_CENTER, dx, dy);
 
     *icon_out = make_icon(box, buf, pts, npts, icon_col);
 
     lv_obj_t *i = lv_label_create(box);
     lv_obj_set_style_text_color(i, COL_WHITE, 0);
-    lv_obj_set_style_text_font(i, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(i, font_int, 0);
     lv_label_set_text(i, "--");
     *int_out = i;
 
     lv_obj_t *d = lv_label_create(box);
     lv_obj_set_style_text_color(d, COL_GRAY, 0);
-    lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(d, font_dec, 0);
     lv_label_set_text(d, "");
     *dec_out = d;
 
@@ -415,12 +420,14 @@ static void build_watch_page(lv_obj_t *parent)
     /* Read-outs on the 9-3 line: temperature between the "45" marker and the
      * hub, humidity between the hub and "15". Created before the hands so the
      * hands sweep over them rather than under. */
-    box_ft = make_readout(parent, -46, icon_fire_buf, FLAME_PTS,
+    box_ft = make_readout(parent, -46, 0, icon_fire_buf, FLAME_PTS,
                           (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])),
-                          COL_T_COLD, &icon_fire, &lbl_ft_int, &lbl_ft_dec);
-    box_fh = make_readout(parent,  46, icon_drop_buf, DROP_PTS,
+                          COL_T_COLD, &lv_font_montserrat_16, &lv_font_montserrat_12,
+                          &icon_fire, &lbl_ft_int, &lbl_ft_dec);
+    box_fh = make_readout(parent,  46, 0, icon_drop_buf, DROP_PTS,
                           (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])),
-                          COL_BLUE, &icon_drop, &lbl_fh_int, &lbl_fh_dec);
+                          COL_BLUE, &lv_font_montserrat_16, &lv_font_montserrat_12,
+                          &icon_drop, &lbl_fh_int, &lbl_fh_dec);
     /* Nothing is known at boot, so start hidden rather than showing "--". */
     lv_obj_add_flag(box_ft, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(box_fh, LV_OBJ_FLAG_HIDDEN);
@@ -442,65 +449,41 @@ static void build_watch_page(lv_obj_t *parent)
 }
 
 /* --------------------------------------------------------------------- */
-static void add_climate_block(lv_obj_t *parent, int cy, const char *caption,
-                              lv_color_t indicator, int range_min, int range_max,
-                              lv_obj_t **arc_out, lv_obj_t **val_out)
-{
-    /* Smaller than before: on this page the clock is the headline and these
-     * are supporting detail, so they give up their size to it. */
-    const int d  = 66;
-    const int cx = SCREEN_W / 2;
 
-    lv_obj_t *a = make_gauge(parent, cx, cy, d, indicator, range_min, range_max);
-    *arc_out = a;
-
-    /* 66 less two 7px strokes leaves ~52px of clear width, which montserrat_16
-     * fills with the widest reading ("100.0") and no more. */
-    lv_obj_t *v = lv_label_create(a);
-    lv_obj_set_style_text_color(v, COL_WHITE, 0);
-    lv_obj_set_style_text_font(v, &lv_font_montserrat_16, 0);
-    lv_label_set_text(v, "--");
-    lv_obj_align(v, LV_ALIGN_CENTER, 0, -7);
-    *val_out = v;
-
-    lv_obj_t *c = lv_label_create(a);
-    lv_obj_set_style_text_color(c, COL_GRAY, 0);
-    lv_obj_set_style_text_font(c, &lv_font_montserrat_12, 0);
-    lv_label_set_text(c, caption);
-    lv_obj_align(c, LV_ALIGN_CENTER, 0, 11);
-}
 
 static void build_climate_page(lv_obj_t *parent)
 {
     lv_obj_set_style_bg_color(parent, COL_BLACK, 0);
     lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
 
-    /* Stacked on the vertical centre line: temperature above, clock in the
-     * middle at montserrat_40, humidity below. The clock is the reason to
-     * look at this page, so it takes the centre and the largest face. */
-    add_climate_block(parent,  54, "TEMP C", COL_T_COLD,
-                      TEMP_MIN, TEMP_MAX, &arc_temp, &lbl_temp);
+    /* Temperature above, clock in the middle, humidity below. With the arcs
+     * gone the clock can run at montserrat_48 and still clear both rows. */
+    box_ct = make_readout(parent, 0, -66, icon_fire_buf, FLAME_PTS,
+                          (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])),
+                          COL_T_COLD, &lv_font_montserrat_24, &lv_font_montserrat_14,
+                          &icon_fire2, &lbl_ct_int, &lbl_ct_dec);
 
     lbl_clim_time = lv_label_create(parent);
     lv_obj_set_style_text_color(lbl_clim_time, COL_GREEN, 0);
-    lv_obj_set_style_text_font(lbl_clim_time, &lv_font_montserrat_40, 0);
+    lv_obj_set_style_text_font(lbl_clim_time, &lv_font_montserrat_48, 0);
     lv_label_set_text(lbl_clim_time, "--:--");
     lv_obj_align(lbl_clim_time, LV_ALIGN_CENTER, 0, 0);
 
-    add_climate_block(parent, 186, "HUM %", COL_BLUE,
-                      HUM_MIN, HUM_MAX, &arc_hum, &lbl_hum);
+    box_ch = make_readout(parent, 0, 66, icon_drop_buf, DROP_PTS,
+                          (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])),
+                          COL_BLUE, &lv_font_montserrat_24, &lv_font_montserrat_14,
+                          &icon_drop2, &lbl_ch_int, &lbl_ch_dec);
 
-    /* Shown only when both gauges are hidden: an otherwise empty page looks
-     * like a fault rather than a deliberate "nothing to report". Sits where
-     * the humidity gauge was, clear of the clock. */
+    /* Shown only when both rows are hidden: an otherwise bare page looks
+     * like a fault rather than a deliberate "nothing to report". */
     lbl_clim_nodata = lv_label_create(parent);
     lv_obj_set_style_text_color(lbl_clim_nodata, COL_GRAY, 0);
     lv_obj_set_style_text_font(lbl_clim_nodata, &lv_font_montserrat_14, 0);
     lv_label_set_text(lbl_clim_nodata, "no sensor data");
-    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 58);
+    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 66);
 
-    lv_obj_add_flag(arc_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(arc_hum,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(box_ct, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(box_ch, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* --------------------------------------------------------------------- */
@@ -812,23 +795,7 @@ void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,
 }
 
 /* --------------------------------------------------------------------- */
-static void set_gauge(lv_obj_t *arc, lv_obj_t *lbl, float v, bool valid,
-                      int lo, int hi)
-{
-    if (!valid) {
-        lv_arc_set_value(arc, lo * 10);
-        lv_label_set_text(lbl, "--");
-        return;
-    }
-    float cl = v;
-    if (cl < (float)lo) cl = (float)lo;
-    if (cl > (float)hi) cl = (float)hi;
-    lv_arc_set_value(arc, (int)lroundf(cl * 10.0f));
 
-    char s[16];
-    snprintf(s, sizeof(s), "%.1f", v);  /* real value as text, even if clamped */
-    lv_label_set_text(lbl, s);
-}
 
 /* Face read-out: whole number big, decimal small. */
 static void set_readout(lv_obj_t *ip, lv_obj_t *dp, float v, bool valid)
@@ -854,8 +821,8 @@ static void show_obj(lv_obj_t *o, bool on)
  * only replaces the gauges when neither reading is available. */
 static void climate_hint_update(void)
 {
-    bool none = lv_obj_has_flag(arc_temp, LV_OBJ_FLAG_HIDDEN) &&
-                lv_obj_has_flag(arc_hum,  LV_OBJ_FLAG_HIDDEN);
+    bool none = lv_obj_has_flag(box_ct, LV_OBJ_FLAG_HIDDEN) &&
+                lv_obj_has_flag(box_ch, LV_OBJ_FLAG_HIDDEN);
     show_obj(lbl_clim_nodata, none);
 }
 
@@ -863,36 +830,34 @@ void ui_set_temperature(float celsius, bool valid)
 {
     /* Unavailable means gone, not "--": a stale number that looks current is
      * worse than an empty space. */
-    show_obj(box_ft,   valid);
-    show_obj(arc_temp, valid);
+    show_obj(box_ft, valid);
+    show_obj(box_ct, valid);
     climate_hint_update();
     if (!valid) return;
 
-    /* Colour follows the reading, so the gauge is legible at a glance even
-     * before the number is read. Held at the cold end while invalid. */
-    lv_color_t c = valid ? temp_color(celsius) : COL_T_COLD;
-    lv_obj_set_style_arc_color(arc_temp, c, LV_PART_INDICATOR);
-
-    /* The flame tracks the same ramp. Redrawn only when the colour actually
-     * changes -- every redraw invalidates the icon and costs a flush. */
+    /* The flame tracks the temperature ramp. Redrawn only when the colour
+     * actually changes -- every redraw invalidates both canvases. */
+    lv_color_t c = temp_color(celsius);
     if (!fire_col_valid || lv_color_to32(c) != lv_color_to32(fire_col_now)) {
         fire_col_now   = c;
         fire_col_valid = true;
-        draw_icon(icon_fire_buf, icon_fire, FLAME_PTS,
+        draw_icon(icon_fire_buf, FLAME_PTS,
                   (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])), c);
+        lv_obj_invalidate(icon_fire);
+        lv_obj_invalidate(icon_fire2);
     }
 
-    set_readout(lbl_ft_int, lbl_ft_dec, celsius, valid);
-    set_gauge(arc_temp, lbl_temp, celsius, valid, TEMP_MIN, TEMP_MAX);
+    set_readout(lbl_ft_int, lbl_ft_dec, celsius, true);
+    set_readout(lbl_ct_int, lbl_ct_dec, celsius, true);
 }
 
 void ui_set_humidity(float percent, bool valid)
 {
-    show_obj(box_fh,  valid);
-    show_obj(arc_hum, valid);
+    show_obj(box_fh, valid);
+    show_obj(box_ch, valid);
     climate_hint_update();
     if (!valid) return;
 
-    set_readout(lbl_fh_int, lbl_fh_dec, percent, valid);
-    set_gauge(arc_hum, lbl_hum, percent, valid, HUM_MIN, HUM_MAX);
+    set_readout(lbl_fh_int, lbl_fh_dec, percent, true);
+    set_readout(lbl_ch_int, lbl_ch_dec, percent, true);
 }

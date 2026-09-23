@@ -42,6 +42,7 @@
 #define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_MONTSERRAT_40 1
+#define LV_FONT_MONTSERRAT_48 1   /* climate page clock */
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 /* ---- Keep logging quiet ---- */
