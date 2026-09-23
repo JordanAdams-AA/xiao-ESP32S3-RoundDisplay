@@ -42,10 +42,14 @@ static void IRAM_ATTR touch_isr(void)
  * display space, so "up" is whichever way is up in the current rotation. */
 static void apply_rotation(int rx, int ry, int *lx, int *ly)
 {
+    /* Cases 1 and 3 are each other's inverse, and they were the wrong way
+     * round: at 90 and 270 degrees swipes came out reversed while 0 and 180
+     * behaved. 180 hid the error because it is its own inverse -- applying a
+     * backwards 90 twice gives -180, which is the same mapping as +180. */
     switch (rotation & 3) {
-    case 1:  *lx = SCREEN_W - 1 - ry; *ly = rx;                   break;
+    case 1:  *lx = ry;                *ly = SCREEN_H - 1 - rx;    break;
     case 2:  *lx = SCREEN_W - 1 - rx; *ly = SCREEN_H - 1 - ry;    break;
-    case 3:  *lx = ry;                *ly = SCREEN_H - 1 - rx;    break;
+    case 3:  *lx = SCREEN_W - 1 - ry; *ly = rx;                   break;
     default: *lx = rx;                *ly = ry;                   break;
     }
 }
