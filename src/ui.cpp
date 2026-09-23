@@ -44,8 +44,13 @@ static const int CY = SCREEN_H / 2;
 
 /* ---- Pages ---- */
 static lv_obj_t *tileview;
-static lv_obj_t *tile_watch, *tile_climate;
-static int cur_page = UI_PAGE_WATCH;
+static lv_obj_t *tile_watch, *tile_climate, *tile_settings;
+static int cur_col = 0, cur_row = 0;
+
+/* ---- Settings ---- */
+static lv_obj_t *lbl_rot_value;
+static uint8_t   rotation = 0;
+static ui_rotate_cb_t rotate_cb = NULL;
 
 /* ---- Page 0: watch ---- */
 static lv_obj_t *hand_hour, *hand_min, *hand_sec;
@@ -288,6 +293,71 @@ static void build_climate_page(lv_obj_t *parent)
 }
 
 /* --------------------------------------------------------------------- */
+static void rotate_clicked(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    ui_set_rotation((uint8_t)((rotation + 1) & 3));
+}
+
+static void build_settings_page(lv_obj_t *parent)
+{
+    lv_obj_set_style_bg_color(parent, COL_BLACK, 0);
+    lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
+
+    lv_obj_t *title = lv_label_create(parent);
+    lv_obj_set_style_text_color(title, COL_GRAY, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_label_set_text(title, "SETTINGS");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 46);
+
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 132, 52);
+    lv_obj_align(btn, LV_ALIGN_CENTER, 0, -6);
+    lv_obj_set_style_radius(btn, 26, 0);
+    lv_obj_set_style_bg_color(btn, COL_DARKGRAY, 0);
+    lv_obj_set_style_border_color(btn, COL_GREEN, 0);
+    lv_obj_set_style_border_width(btn, 2, 0);
+    lv_obj_add_event_cb(btn, rotate_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *bl = lv_label_create(btn);
+    lv_obj_set_style_text_color(bl, COL_WHITE, 0);
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_20, 0);
+    lv_label_set_text(bl, "ROTATE");
+    lv_obj_center(bl);
+
+    /* Montserrat's built-in ranges are ASCII, so no degree glyph. */
+    lbl_rot_value = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl_rot_value, COL_GREEN, 0);
+    lv_obj_set_style_text_font(lbl_rot_value, &lv_font_montserrat_20, 0);
+    lv_label_set_text(lbl_rot_value, "0 deg");
+    lv_obj_align(lbl_rot_value, LV_ALIGN_CENTER, 0, 44);
+
+    lv_obj_t *hint = lv_label_create(parent);
+    lv_obj_set_style_text_color(hint, COL_GRAY, 0);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+    lv_label_set_text(hint, "swipe down for watch");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -42);
+}
+
+/* --------------------------------------------------------------------- */
+void ui_set_rotate_handler(ui_rotate_cb_t cb) { rotate_cb = cb; }
+uint8_t ui_get_rotation(void) { return rotation; }
+
+void ui_set_rotation(uint8_t r)
+{
+    rotation = r & 3;
+
+    char s[12];
+    snprintf(s, sizeof(s), "%d deg", rotation * 90);
+    lv_label_set_text(lbl_rot_value, s);
+
+    /* The panel keeps its pixels; only the scan mapping changes. Nothing in
+     * LVGL's dirty-area tracking knows that, so repaint everything. */
+    if (rotate_cb) rotate_cb(rotation);
+    lv_obj_invalidate(lv_scr_act());
+}
+
+/* --------------------------------------------------------------------- */
 void ui_create(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -300,35 +370,56 @@ void ui_create(void)
     lv_obj_set_style_bg_opa(tileview, LV_OPA_COVER, 0);
     lv_obj_set_scrollbar_mode(tileview, LV_SCROLLBAR_MODE_OFF);
 
-    tile_watch   = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_RIGHT);
-    tile_climate = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_LEFT);
+    /* LV_DIR_NONE: paging is driven from the touch driver's own gesture
+     * detection, not LVGL's drag-scroll. An LVGL input device is registered
+     * so buttons work, and letting the tileview also scroll on drag would
+     * fight that handler and double-trigger page changes. */
+    tile_watch    = lv_tileview_add_tile(tileview, 0, 0, LV_DIR_NONE);
+    tile_climate  = lv_tileview_add_tile(tileview, 1, 0, LV_DIR_NONE);
+    tile_settings = lv_tileview_add_tile(tileview, 0, 1, LV_DIR_NONE);
 
-    lv_obj_t *tiles[2] = { tile_watch, tile_climate };
-    for (int i = 0; i < 2; i++) {
+    lv_obj_t *tiles[3] = { tile_watch, tile_climate, tile_settings };
+    for (int i = 0; i < 3; i++) {
         lv_obj_set_style_pad_all(tiles[i], 0, 0);
         lv_obj_set_style_border_width(tiles[i], 0, 0);
         lv_obj_set_scrollbar_mode(tiles[i], LV_SCROLLBAR_MODE_OFF);
+        lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_SCROLLABLE);
     }
 
     build_watch_page(tile_watch);
     build_climate_page(tile_climate);
+    build_settings_page(tile_settings);
 
-    ui_page_set(UI_PAGE_WATCH, false);
+    cur_col = cur_row = 0;
+    lv_obj_set_tile_id(tileview, 0, 0, LV_ANIM_OFF);
 }
 
 /* --------------------------------------------------------------------- */
-void ui_page_set(int page, bool animate)
+/* Only these grid cells exist; anything else is a no-op rather than a scroll
+ * into empty space. */
+static bool cell_exists(int col, int row)
 {
-    if (page < 0) page = UI_PAGE_COUNT - 1;
-    if (page >= UI_PAGE_COUNT) page = 0;
-    cur_page = page;
-    lv_obj_set_tile_id(tileview, (uint32_t)page, 0,
-                       animate ? LV_ANIM_ON : LV_ANIM_OFF);
+    return (col == 0 && row == 0) ||   /* watch    */
+           (col == 1 && row == 0) ||   /* climate  */
+           (col == 0 && row == 1);     /* settings */
 }
 
-void ui_page_next(void) { ui_page_set(cur_page + 1, true); }
-void ui_page_prev(void) { ui_page_set(cur_page - 1, true); }
-int  ui_page_get(void)  { return cur_page; }
+void ui_nav(int dcol, int drow)
+{
+    int c = cur_col + dcol;
+    int r = cur_row + drow;
+    if (!cell_exists(c, r)) return;
+
+    cur_col = c;
+    cur_row = r;
+    lv_obj_set_tile_id(tileview, (uint32_t)c, (uint32_t)r, LV_ANIM_ON);
+}
+
+int ui_page_get(void)
+{
+    if (cur_row == 1) return UI_PAGE_SETTINGS;
+    return cur_col == 1 ? UI_PAGE_CLIMATE : UI_PAGE_WATCH;
+}
 
 /* --------------------------------------------------------------------- */
 void ui_set_time(int hour, int minute, float sec, int wday, int mday, int month,

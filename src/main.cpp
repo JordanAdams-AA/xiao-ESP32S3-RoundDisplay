@@ -25,6 +25,7 @@
 #include <WebServer.h>
 #include <ElegantOTA.h>
 #include <PubSubClient.h>
+#include <Preferences.h>
 #include <time.h>
 #include <ctype.h>
 #include <lvgl.h>
@@ -172,6 +173,11 @@ static void wifi_start()
     WiFi.setHostname(HOSTNAME);
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);          /* sleep can stall association on some APs */
+    /* This SSID is served by more than one AP. The default fast scan stops at
+     * the first match, which repeatedly picked a -88 dBm radio while a -53 dBm
+     * one was in range. Scan every channel and take the strongest. */
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
     /* Ask for full transmit power explicitly rather than trusting the default.
      * Worth doing on this board: the XIAO S3 has no usable on-board antenna,
      * so link margin is tight and every dB counts. */
@@ -306,6 +312,44 @@ static void update_clock()
     if (want != lastDim) { backlight_set((uint8_t)want); lastDim = want; }
 }
 
+/* ---------------- Rotation ----------------
+ * Turning the panel is done in the GC9A01's scan mapping, not by rotating
+ * pixels in software: it costs nothing per frame. The screen is square, so
+ * LVGL's resolution is unchanged. The choice is kept in NVS because it
+ * describes how the device is physically mounted. */
+static Preferences prefs;
+
+static void apply_rotation(uint8_t r)
+{
+    gfx->setRotation(r);
+    touch_set_rotation(r);          /* keep taps and swipes aligned */
+    gfx->fillScreen(BLACK);         /* drop whatever the old mapping left */
+
+    /* Only write on a real change: this also runs when restoring at boot,
+     * and rewriting the same value every time is pointless flash wear. */
+    prefs.begin("watchface", false);
+    if (prefs.getUChar("rot", 0) != r) prefs.putUChar("rot", r);
+    prefs.end();
+
+    Serial.printf("ui: rotation set to %d deg\n", r * 90);
+}
+
+/* ---------------- LVGL input device ----------------
+ * Needed for the settings page button; the touch driver's own gesture
+ * detection still drives paging. */
+static void lvgl_touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data)
+{
+    LV_UNUSED(drv);
+    int x = 0, y = 0;
+    if (touch_get_state(&x, &y)) {
+        data->point.x = (lv_coord_t)x;
+        data->point.y = (lv_coord_t)y;
+        data->state   = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
 /* ---------------- Paging (ui_task only) ----------------
  * The CST816 reports swipes itself, so there is no LVGL input device and no
  * dependence on the touch panel's axes matching the display rotation. */
@@ -314,19 +358,20 @@ static void service_pages()
     if (!touch_present()) return;
 
     TouchGesture g = touch_poll();
-    if (g != TG_NONE)
-        Serial.printf("touch: gesture=%d travel=%u\n",
-                      (int)g, (unsigned)touch_last_raw());
+    if (g == TG_NONE) return;
 
+    Serial.printf("touch: gesture=%d travel=%u page=%d\n",
+                  (int)g, (unsigned)touch_last_raw(), ui_page_get());
+
+    /* The content follows the finger, so the tile that comes into view is
+     * the one on that side: swipe up reveals the tile below. */
+    const int s = SWIPE_INVERT ? -1 : 1;
     switch (g) {
-    case TG_LEFT:                   /* content moves left -> next page */
-        if (SWIPE_INVERT) ui_page_prev(); else ui_page_next();
-        break;
-    case TG_RIGHT:
-        if (SWIPE_INVERT) ui_page_next(); else ui_page_prev();
-        break;
-    default:
-        break;
+    case TG_LEFT:  ui_nav( 1 * s,  0); break;
+    case TG_RIGHT: ui_nav(-1 * s,  0); break;
+    case TG_UP:    ui_nav( 0,  1 * s); break;   /* settings sits below */
+    case TG_DOWN:  ui_nav( 0, -1 * s); break;
+    default:       break;
     }
 }
 
@@ -472,7 +517,20 @@ void setup()
     /* Probe touch before the tasks start so the result is logged in order. */
     touch_init();
 
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type    = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = lvgl_touch_read;
+    lv_indev_drv_register(&indev_drv);
+
     ui_create();
+
+    /* Restore the mounting orientation chosen on the settings page. */
+    prefs.begin("watchface", true);
+    uint8_t rot = prefs.getUChar("rot", 0);
+    prefs.end();
+    ui_set_rotate_handler(apply_rotation);
+    ui_set_rotation(rot);
 
 #if USE_DUMMY_DATA
     ui_set_temperature(DUMMY_TEMP, true);   /* safe: no tasks running yet */

@@ -30,10 +30,24 @@ static bool     tracking = false;
 static int      start_x = 0, start_y = 0;
 static int      cur_x   = 0, cur_y   = 0;
 static uint32_t last_ms = 0;
+static uint8_t  rotation = 0;
 
 static void IRAM_ATTR touch_isr(void)
 {
     irq_hit = true;
+}
+
+/* Map raw panel coordinates into the rotated screen space the user sees.
+ * Doing it here means gestures fall out correctly too: dx/dy are already in
+ * display space, so "up" is whichever way is up in the current rotation. */
+static void apply_rotation(int rx, int ry, int *lx, int *ly)
+{
+    switch (rotation & 3) {
+    case 1:  *lx = SCREEN_W - 1 - ry; *ly = rx;                   break;
+    case 2:  *lx = SCREEN_W - 1 - rx; *ly = SCREEN_H - 1 - ry;    break;
+    case 3:  *lx = ry;                *ly = SCREEN_H - 1 - rx;    break;
+    default: *lx = rx;                *ly = ry;                   break;
+    }
 }
 
 static bool read_point(int *x, int *y)
@@ -46,8 +60,19 @@ static bool read_point(int *x, int *y)
     /* b[0] is a status/'points present' marker; coordinates are single bytes,
      * which is why this panel tops out at 255 and suits a 240px screen. */
     if (b[0] == 0) return false;
-    *x = b[2];
-    *y = b[4];
+    apply_rotation(b[2], b[4], x, y);
+    return true;
+}
+
+void touch_set_rotation(uint8_t r) { rotation = r & 3; }
+
+bool touch_get_state(int *x, int *y)
+{
+    if (!tracking) return false;
+    /* The finger is considered down until the INT line has been quiet for
+     * TOUCH_IDLE_MS; touch_poll() is what ends the press. */
+    *x = cur_x;
+    *y = cur_y;
     return true;
 }
 
