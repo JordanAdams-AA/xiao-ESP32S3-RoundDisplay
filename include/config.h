@@ -49,9 +49,8 @@
  * are not guaranteed to line up with the display's rotation. */
 #define SWIPE_INVERT 0
 
-/* Fallback when no touch controller is detected: cycle the pages on a timer
- * so the second page is still reachable. 0 disables it (stays on page 1). */
-#define AUTO_PAGE_SECONDS 20
+/* Pages change on swipe only. There is deliberately no timed rotation: the
+ * screen moving on its own is distracting on a watch face. */
 
 /* =====================================================================
  *  MQTT TOPICS

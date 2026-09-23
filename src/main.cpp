@@ -311,41 +311,23 @@ static void update_clock()
  * dependence on the touch panel's axes matching the display rotation. */
 static void service_pages()
 {
-    /* Set once a swipe has actually changed a page. The touch chip cannot be
-     * probed at rest, so "present" is only an inference from the RTC being on
-     * the same bus -- this is the proof that the panel really works. */
-    static bool swipe_works = false;
+    if (!touch_present()) return;
 
-    if (touch_present()) {
-        TouchGesture g = touch_poll();
-        if (g != TG_NONE)
-            Serial.printf("touch: gesture=%d travel=%u\n",
-                          (int)g, (unsigned)touch_last_raw());
+    TouchGesture g = touch_poll();
+    if (g != TG_NONE)
+        Serial.printf("touch: gesture=%d travel=%u\n",
+                      (int)g, (unsigned)touch_last_raw());
 
-        switch (g) {
-        case TG_LEFT:               /* content moves left -> next page */
-            swipe_works = true;
-            if (SWIPE_INVERT) ui_page_prev(); else ui_page_next();
-            break;
-        case TG_RIGHT:
-            swipe_works = true;
-            if (SWIPE_INVERT) ui_page_next(); else ui_page_prev();
-            break;
-        default:
-            break;
-        }
+    switch (g) {
+    case TG_LEFT:                   /* content moves left -> next page */
+        if (SWIPE_INVERT) ui_page_prev(); else ui_page_next();
+        break;
+    case TG_RIGHT:
+        if (SWIPE_INVERT) ui_page_next(); else ui_page_prev();
+        break;
+    default:
+        break;
     }
-
-#if AUTO_PAGE_SECONDS > 0
-    /* Keep the second page reachable until swiping is known to work, so a
-     * dead or mis-wired panel cannot strand the face on page 1. */
-    if (swipe_works) return;
-    static uint32_t last = 0;
-    if (millis() - last >= (uint32_t)AUTO_PAGE_SECONDS * 1000) {
-        last = millis();
-        ui_page_next();
-    }
-#endif
 }
 
 /* ==================================================================== */
