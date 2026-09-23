@@ -160,19 +160,20 @@ static void draw_background(lv_obj_t *parent)
 typedef struct { float x, y; } icon_pt_t;
 
 static const icon_pt_t FLAME_PTS[] = {
-    {11.2f,  0.6f},                                   /* main tip          */
-    {12.5f,  3.2f}, {13.7f,  5.6f}, {14.6f,  8.0f},
-    {15.4f, 10.6f}, {15.6f, 13.2f}, {15.0f, 15.8f},
-    {13.7f, 18.2f}, {11.6f, 20.0f}, { 9.2f, 20.9f},   /* round bottom      */
-    { 6.6f, 20.8f}, { 4.5f, 19.5f}, { 2.9f, 17.5f},
-    { 2.2f, 15.0f}, { 2.4f, 12.4f}, { 3.3f,  9.9f},
-    { 4.6f,  7.8f}, { 5.7f,  6.3f},                   /* left flank up     */
-    { 4.5f,  4.7f}, { 4.2f,  3.4f}, { 5.3f,  2.8f},   /* second lobe, blunt
-                                                       * enough to survive
-                                                       * at this size      */
-    { 6.4f,  3.9f},
-    { 8.1f,  6.5f},                                   /* valley between    */
-    { 9.9f,  3.1f},
+    /* Traced from a standard "fire" glyph: tall body with a hooked tip, a
+     * concave left flank, and a separate curl low on the left. Filled as a
+     * solid silhouette -- the glyph's inner flame cannot survive at 18x22. */
+    {10.3f,  0.5f},                                   /* hooked main tip   */
+    {11.1f,  3.3f}, {12.1f,  5.9f}, {13.5f,  8.8f},   /* right flank bulge */
+    {15.0f, 11.7f}, {15.9f, 14.4f}, {16.0f, 16.9f},
+    {15.2f, 18.9f}, {13.5f, 20.3f}, {11.1f, 21.0f},   /* wide round base   */
+    { 8.4f, 21.0f}, { 5.9f, 20.3f}, { 3.9f, 19.1f},
+    { 2.4f, 17.1f}, { 2.0f, 14.9f}, { 2.3f, 12.2f},   /* left flank up     */
+    { 2.2f,  9.4f}, { 3.0f,  7.0f}, { 4.4f,  8.3f},   /* curl, rounded so
+                                                       * it holds pixels   */
+    { 6.2f, 11.6f},                                   /* valley behind it  */
+    { 6.5f,  8.6f}, { 6.8f,  6.4f}, { 7.0f,  4.3f},   /* concave left edge */
+    { 8.3f,  2.0f},
 };
 
 static const icon_pt_t DROP_PTS[] = {
