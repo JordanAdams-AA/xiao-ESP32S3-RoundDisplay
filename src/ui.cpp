@@ -65,6 +65,7 @@ static lv_obj_t *lbl_day,  *lbl_month;
 #define ICON_H 22
 #define ICON_SS 4   /* supersamples per axis, for antialiasing */
 static lv_obj_t *icon_fire, *icon_drop;
+static lv_obj_t *box_ft, *box_fh;      /* whole read-out groups, hidden as one */
 static lv_obj_t *lbl_ft_int, *lbl_ft_dec;   /* face temperature */
 static lv_obj_t *lbl_fh_int, *lbl_fh_dec;   /* face humidity    */
 /* TRUE_COLOR, not TRUE_COLOR_ALPHA: LVGL only supports drawing onto an
@@ -80,6 +81,7 @@ static bool       fire_col_valid = false;
 static lv_obj_t *arc_temp, *lbl_temp;
 static lv_obj_t *arc_hum,  *lbl_hum;
 static lv_obj_t *lbl_clim_time;
+static lv_obj_t *lbl_clim_nodata;
 
 /* Static background (tick ring + numbers), drawn once onto a canvas in PSRAM */
 static lv_color_t *cbuf = NULL;
@@ -407,12 +409,15 @@ static void build_watch_page(lv_obj_t *parent)
     /* Read-outs on the 9-3 line: temperature between the "45" marker and the
      * hub, humidity between the hub and "15". Created before the hands so the
      * hands sweep over them rather than under. */
-    make_readout(parent, -46, icon_fire_buf, FLAME_PTS,
-                 (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])), COL_T_COLD,
-                 &icon_fire, &lbl_ft_int, &lbl_ft_dec);
-    make_readout(parent,  46, icon_drop_buf, DROP_PTS,
-                 (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])), COL_BLUE,
-                 &icon_drop, &lbl_fh_int, &lbl_fh_dec);
+    box_ft = make_readout(parent, -46, icon_fire_buf, FLAME_PTS,
+                          (int)(sizeof(FLAME_PTS) / sizeof(FLAME_PTS[0])),
+                          COL_T_COLD, &icon_fire, &lbl_ft_int, &lbl_ft_dec);
+    box_fh = make_readout(parent,  46, icon_drop_buf, DROP_PTS,
+                          (int)(sizeof(DROP_PTS) / sizeof(DROP_PTS[0])),
+                          COL_BLUE, &icon_drop, &lbl_fh_int, &lbl_fh_dec);
+    /* Nothing is known at boot, so start hidden rather than showing "--". */
+    lv_obj_add_flag(box_ft, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(box_fh, LV_OBJ_FLAG_HIDDEN);
 
     /* Hands on top, then the centre hub */
     hand_hour = make_hand(parent, COL_WHITE, 6, pts_hour);
@@ -476,6 +481,17 @@ static void build_climate_page(lv_obj_t *parent)
                       TEMP_MIN, TEMP_MAX, &arc_temp, &lbl_temp);
     add_climate_block(parent, 172, "HUM %", COL_BLUE,
                       HUM_MIN, HUM_MAX, &arc_hum, &lbl_hum);
+
+    /* Shown only when both gauges are hidden: an otherwise empty page looks
+     * like a fault rather than a deliberate "nothing to report". */
+    lbl_clim_nodata = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl_clim_nodata, COL_GRAY, 0);
+    lv_obj_set_style_text_font(lbl_clim_nodata, &lv_font_montserrat_16, 0);
+    lv_label_set_text(lbl_clim_nodata, "no sensor data");
+    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_add_flag(arc_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(arc_hum,  LV_OBJ_FLAG_HIDDEN);
 }
 
 /* --------------------------------------------------------------------- */
@@ -704,8 +720,30 @@ static void set_readout(lv_obj_t *ip, lv_obj_t *dp, float v, bool valid)
     lv_label_set_text(dp, b);
 }
 
+static void show_obj(lv_obj_t *o, bool on)
+{
+    if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* The climate page keeps its clock, so it is never truly blank; the notice
+ * only replaces the gauges when neither reading is available. */
+static void climate_hint_update(void)
+{
+    bool none = lv_obj_has_flag(arc_temp, LV_OBJ_FLAG_HIDDEN) &&
+                lv_obj_has_flag(arc_hum,  LV_OBJ_FLAG_HIDDEN);
+    show_obj(lbl_clim_nodata, none);
+}
+
 void ui_set_temperature(float celsius, bool valid)
 {
+    /* Unavailable means gone, not "--": a stale number that looks current is
+     * worse than an empty space. */
+    show_obj(box_ft,   valid);
+    show_obj(arc_temp, valid);
+    climate_hint_update();
+    if (!valid) return;
+
     /* Colour follows the reading, so the gauge is legible at a glance even
      * before the number is read. Held at the cold end while invalid. */
     lv_color_t c = valid ? temp_color(celsius) : COL_T_COLD;
@@ -726,6 +764,11 @@ void ui_set_temperature(float celsius, bool valid)
 
 void ui_set_humidity(float percent, bool valid)
 {
+    show_obj(box_fh,  valid);
+    show_obj(arc_hum, valid);
+    climate_hint_update();
+    if (!valid) return;
+
     set_readout(lbl_fh_int, lbl_fh_dec, percent, valid);
     set_gauge(arc_hum, lbl_hum, percent, valid, HUM_MIN, HUM_MAX);
 }

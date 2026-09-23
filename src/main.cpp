@@ -85,33 +85,87 @@ static void logmsg(const char *m)
  * parks the value here. ui_task picks it up on its next pass and draws it. */
 static SemaphoreHandle_t pending_mux;
 static struct {
-    float temp,  hum;
-    bool  temp_valid, hum_valid;
-    bool  temp_dirty, hum_dirty;
+    float    temp,  hum;
+    bool     temp_valid, hum_valid;
+    bool     temp_dirty, hum_dirty;
+    uint32_t temp_ms, hum_ms;     /* millis() when each was received */
+    bool     link;                /* MQTT session is up */
 } pending;
+
+static void pending_set_link(bool up)
+{
+    if (xSemaphoreTake(pending_mux, pdMS_TO_TICKS(20)) != pdTRUE) return;
+    pending.link = up;
+    xSemaphoreGive(pending_mux);
+}
 
 static void pending_put(bool is_temp, float v, bool valid)
 {
     if (xSemaphoreTake(pending_mux, pdMS_TO_TICKS(50)) != pdTRUE) return;
-    if (is_temp) { pending.temp = v; pending.temp_valid = valid; pending.temp_dirty = true; }
-    else         { pending.hum  = v; pending.hum_valid  = valid; pending.hum_dirty  = true; }
+    uint32_t now = millis();
+    if (is_temp) {
+        pending.temp = v; pending.temp_valid = valid;
+        pending.temp_dirty = true; pending.temp_ms = now;
+    } else {
+        pending.hum = v;  pending.hum_valid = valid;
+        pending.hum_dirty = true;  pending.hum_ms = now;
+    }
     xSemaphoreGive(pending_mux);
 }
 
-/* ui_task only. Copies out under the lock, then draws outside it. */
+/* ui_task only. Copies out under the lock, then draws outside it.
+ *
+ * Also decides whether a reading is still worth showing. A value is only
+ * displayed while the MQTT session is up and the value is recent: if the
+ * broker goes away -- carrying the watch out of the house, say -- the
+ * read-outs disappear rather than freezing on their last value, which would
+ * otherwise sit there looking like a live reading. */
+static bool climate_fresh(uint32_t now, uint32_t stamp)
+{
+    if (!stamp) return false;                    /* nothing received yet */
+#if CLIMATE_STALE_SECONDS > 0
+    return (now - stamp) < (uint32_t)CLIMATE_STALE_SECONDS * 1000UL;
+#else
+    return true;
+#endif
+}
+
 static void pending_drain()
 {
-    float t = 0, h = 0;
-    bool tv = false, hv = false, td = false, hd = false;
+    static float    temp = 0, hum = 0;
+    static uint32_t temp_ms = 0, hum_ms = 0;
+    static bool     link = false;
+    static bool     shown_t = false, shown_h = false, first = true;
+    bool td = false, hd = false;
 
-    if (xSemaphoreTake(pending_mux, 0) != pdTRUE) return;   /* try again next pass */
-    td = pending.temp_dirty; t = pending.temp; tv = pending.temp_valid;
-    hd = pending.hum_dirty;  h = pending.hum;  hv = pending.hum_valid;
-    pending.temp_dirty = pending.hum_dirty = false;
-    xSemaphoreGive(pending_mux);
+    if (xSemaphoreTake(pending_mux, 0) == pdTRUE) {
+        td = pending.temp_dirty;
+        hd = pending.hum_dirty;
+        if (td) { temp = pending.temp; temp_ms = pending.temp_valid ? pending.temp_ms : 0; }
+        if (hd) { hum  = pending.hum;  hum_ms  = pending.hum_valid  ? pending.hum_ms  : 0; }
+        pending.temp_dirty = pending.hum_dirty = false;
+        link = pending.link;
+        xSemaphoreGive(pending_mux);
+    }
 
-    if (td) ui_set_temperature(t, tv);
-    if (hd) ui_set_humidity(h, hv);
+    uint32_t now = millis();
+#if USE_DUMMY_DATA
+    bool ok_t = true, ok_h = true;               /* bench mode: always show */
+#else
+    bool ok_t = link && climate_fresh(now, temp_ms);
+    bool ok_h = link && climate_fresh(now, hum_ms);
+#endif
+
+    /* Redraw on a new value, on a visibility change, or once at startup. */
+    if (first || ok_t != shown_t || (ok_t && td)) {
+        ui_set_temperature(temp, ok_t);
+        shown_t = ok_t;
+    }
+    if (first || ok_h != shown_h || (ok_h && hd)) {
+        ui_set_humidity(hum, ok_h);
+        shown_h = ok_h;
+    }
+    first = false;
 }
 
 /* ---------------- Backlight (core 2.x / 3.x compatible) ---------------- */
@@ -466,6 +520,8 @@ static void net_task(void *)
         server.handleClient();
         ElegantOTA.loop();
         mqtt_service();
+        /* Drives whether the climate read-outs are shown at all. */
+        pending_set_link(WiFi.status() == WL_CONNECTED && mqtt.connected());
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

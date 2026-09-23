@@ -77,8 +77,16 @@
 #define BL_DAY   255         /* 0-255 backlight duty by day   */
 #define BL_NIGHT 60          /* 0-255 backlight duty by night */
 
+/* Hide the climate read-outs once the newest value is this old, even while
+ * MQTT is still up: a sensor that has gone quiet is no more available than a
+ * broken link. HA's statestream only publishes on change and does not retain,
+ * so keep this comfortably longer than the sensor's quietest period.
+ * 0 disables the staleness check and relies on the MQTT link alone. */
+#define CLIMATE_STALE_SECONDS 1800
+
 /* Set to 1 to show fixed dummy values without any MQTT (useful for a first
- * flash to check the face renders). MQTT still overrides if it connects. */
+ * flash to check the face renders). This also bypasses the availability
+ * checks above, so the read-outs stay on screen with no broker at all. */
 #define USE_DUMMY_DATA 0
 #define DUMMY_TEMP 21.5f
 #define DUMMY_HUM  48.0f
