@@ -442,30 +442,32 @@ static void build_watch_page(lv_obj_t *parent)
 }
 
 /* --------------------------------------------------------------------- */
-static void add_climate_block(lv_obj_t *parent, int cx, const char *caption,
+static void add_climate_block(lv_obj_t *parent, int cy, const char *caption,
                               lv_color_t indicator, int range_min, int range_max,
                               lv_obj_t **arc_out, lv_obj_t **val_out)
 {
-    const int d  = 88;
-    const int cy = 124;
+    /* Smaller than before: on this page the clock is the headline and these
+     * are supporting detail, so they give up their size to it. */
+    const int d  = 66;
+    const int cx = SCREEN_W / 2;
 
     lv_obj_t *a = make_gauge(parent, cx, cy, d, indicator, range_min, range_max);
     *arc_out = a;
 
-    /* montserrat_24, not 28: the widest reading is now "100.0", and the arc
-     * leaves only ~74px of clear width inside its stroke. */
+    /* 66 less two 7px strokes leaves ~52px of clear width, which montserrat_16
+     * fills with the widest reading ("100.0") and no more. */
     lv_obj_t *v = lv_label_create(a);
     lv_obj_set_style_text_color(v, COL_WHITE, 0);
-    lv_obj_set_style_text_font(v, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(v, &lv_font_montserrat_16, 0);
     lv_label_set_text(v, "--");
-    lv_obj_align(v, LV_ALIGN_CENTER, 0, -8);
+    lv_obj_align(v, LV_ALIGN_CENTER, 0, -7);
     *val_out = v;
 
     lv_obj_t *c = lv_label_create(a);
     lv_obj_set_style_text_color(c, COL_GRAY, 0);
-    lv_obj_set_style_text_font(c, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(c, &lv_font_montserrat_12, 0);
     lv_label_set_text(c, caption);
-    lv_obj_align(c, LV_ALIGN_CENTER, 0, 18);
+    lv_obj_align(c, LV_ALIGN_CENTER, 0, 11);
 }
 
 static void build_climate_page(lv_obj_t *parent)
@@ -473,28 +475,29 @@ static void build_climate_page(lv_obj_t *parent)
     lv_obj_set_style_bg_color(parent, COL_BLACK, 0);
     lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
 
-    /* Small clock kept here so the page is still glanceable as a watch. */
+    /* Stacked on the vertical centre line: temperature above, clock in the
+     * middle at montserrat_40, humidity below. The clock is the reason to
+     * look at this page, so it takes the centre and the largest face. */
+    add_climate_block(parent,  54, "TEMP C", COL_T_COLD,
+                      TEMP_MIN, TEMP_MAX, &arc_temp, &lbl_temp);
+
     lbl_clim_time = lv_label_create(parent);
     lv_obj_set_style_text_color(lbl_clim_time, COL_GREEN, 0);
-    lv_obj_set_style_text_font(lbl_clim_time, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(lbl_clim_time, &lv_font_montserrat_40, 0);
     lv_label_set_text(lbl_clim_time, "--:--");
-    lv_obj_align(lbl_clim_time, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_align(lbl_clim_time, LV_ALIGN_CENTER, 0, 0);
 
-    /* Both gauges sit on the same centre line, inset far enough that their
-     * outer edges stay inside the round bezel. */
-    /* Temperature starts at the cold end and is recoloured per reading. */
-    add_climate_block(parent,  68, "TEMP C", COL_T_COLD,
-                      TEMP_MIN, TEMP_MAX, &arc_temp, &lbl_temp);
-    add_climate_block(parent, 172, "HUM %", COL_BLUE,
+    add_climate_block(parent, 186, "HUM %", COL_BLUE,
                       HUM_MIN, HUM_MAX, &arc_hum, &lbl_hum);
 
     /* Shown only when both gauges are hidden: an otherwise empty page looks
-     * like a fault rather than a deliberate "nothing to report". */
+     * like a fault rather than a deliberate "nothing to report". Sits where
+     * the humidity gauge was, clear of the clock. */
     lbl_clim_nodata = lv_label_create(parent);
     lv_obj_set_style_text_color(lbl_clim_nodata, COL_GRAY, 0);
-    lv_obj_set_style_text_font(lbl_clim_nodata, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl_clim_nodata, &lv_font_montserrat_14, 0);
     lv_label_set_text(lbl_clim_nodata, "no sensor data");
-    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(lbl_clim_nodata, LV_ALIGN_CENTER, 0, 58);
 
     lv_obj_add_flag(arc_temp, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(arc_hum,  LV_OBJ_FLAG_HIDDEN);
