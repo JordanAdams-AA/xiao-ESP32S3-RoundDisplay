@@ -11,6 +11,33 @@
 #define COL_GRAY     lv_color_hex(0x9A9A9A)
 #define COL_DARKGRAY lv_color_hex(0x333333)
 #define COL_BLACK    lv_color_black()
+#define COL_BLUE     lv_color_hex(0x2E9BE6)   /* humidity indicator */
+
+/* Temperature ramp. 0 / 20 / 30 are the anchors that were asked for; the
+ * green stop at 10 exists because lerping light blue straight to orange
+ * passes through a muddy khaki around the midpoint. */
+#define COL_T_COLD   lv_color_hex(0x7EC8E3)   /*  <= 0 C  light blue */
+#define COL_T_MILD   lv_color_hex(0x7ED321)   /*    10 C  green      */
+#define COL_T_WARM   lv_color_hex(0xF5A623)   /*    20 C  yellow-orange */
+#define COL_T_HOT    lv_color_hex(0xE0322A)   /*  >= 30 C red        */
+
+/* Blend a..b by t in [0,1]. lv_color_mix weights its FIRST argument by the
+ * mix value, so the endpoints go in reversed. */
+static lv_color_t lerp(lv_color_t a, lv_color_t b, float t)
+{
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return lv_color_mix(b, a, (uint8_t)lroundf(t * 255.0f));
+}
+
+static lv_color_t temp_color(float c)
+{
+    if (c <= 0.0f)  return COL_T_COLD;
+    if (c >= 30.0f) return COL_T_HOT;
+    if (c < 10.0f)  return lerp(COL_T_COLD, COL_T_MILD, c / 10.0f);
+    if (c < 20.0f)  return lerp(COL_T_MILD, COL_T_WARM, (c - 10.0f) / 10.0f);
+    return lerp(COL_T_WARM, COL_T_HOT, (c - 20.0f) / 10.0f);
+}
 
 static const int CX = SCREEN_W / 2;
 static const int CY = SCREEN_H / 2;
@@ -132,8 +159,10 @@ static lv_obj_t *make_gauge(lv_obj_t *parent, int cx, int cy, int d,
     lv_obj_set_pos(a, cx - d / 2, cy - d / 2);
     lv_arc_set_rotation(a, 135);          /* opening faces down (270 deg sweep) */
     lv_arc_set_bg_angles(a, 0, 270);
-    lv_arc_set_range(a, range_min, range_max);
-    lv_arc_set_value(a, range_min);
+    /* Arc values are integers, so the range is held in tenths: the needle
+     * then tracks the same resolution the label prints. */
+    lv_arc_set_range(a, range_min * 10, range_max * 10);
+    lv_arc_set_value(a, range_min * 10);
     lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);  /* display only */
 
     lv_obj_set_style_arc_color(a, COL_DARKGRAY, LV_PART_MAIN);
@@ -212,18 +241,20 @@ static void build_watch_page(lv_obj_t *parent)
 
 /* --------------------------------------------------------------------- */
 static void add_climate_block(lv_obj_t *parent, int cx, const char *caption,
-                              int range_min, int range_max,
+                              lv_color_t indicator, int range_min, int range_max,
                               lv_obj_t **arc_out, lv_obj_t **val_out)
 {
     const int d  = 88;
     const int cy = 124;
 
-    lv_obj_t *a = make_gauge(parent, cx, cy, d, COL_GREEN, range_min, range_max);
+    lv_obj_t *a = make_gauge(parent, cx, cy, d, indicator, range_min, range_max);
     *arc_out = a;
 
+    /* montserrat_24, not 28: the widest reading is now "100.0", and the arc
+     * leaves only ~74px of clear width inside its stroke. */
     lv_obj_t *v = lv_label_create(a);
     lv_obj_set_style_text_color(v, COL_WHITE, 0);
-    lv_obj_set_style_text_font(v, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(v, &lv_font_montserrat_24, 0);
     lv_label_set_text(v, "--");
     lv_obj_align(v, LV_ALIGN_CENTER, 0, -8);
     *val_out = v;
@@ -249,8 +280,11 @@ static void build_climate_page(lv_obj_t *parent)
 
     /* Both gauges sit on the same centre line, inset far enough that their
      * outer edges stay inside the round bezel. */
-    add_climate_block(parent,  68, "TEMP C", TEMP_MIN, TEMP_MAX, &arc_temp, &lbl_temp);
-    add_climate_block(parent, 172, "HUM %",  HUM_MIN,  HUM_MAX,  &arc_hum,  &lbl_hum);
+    /* Temperature starts at the cold end and is recoloured per reading. */
+    add_climate_block(parent,  68, "TEMP C", COL_T_COLD,
+                      TEMP_MIN, TEMP_MAX, &arc_temp, &lbl_temp);
+    add_climate_block(parent, 172, "HUM %", COL_BLUE,
+                      HUM_MIN, HUM_MAX, &arc_hum, &lbl_hum);
 }
 
 /* --------------------------------------------------------------------- */
@@ -365,22 +399,27 @@ static void set_gauge(lv_obj_t *arc, lv_obj_t *lbl, float v, bool valid,
                       int lo, int hi)
 {
     if (!valid) {
-        lv_arc_set_value(arc, lo);
+        lv_arc_set_value(arc, lo * 10);
         lv_label_set_text(lbl, "--");
         return;
     }
-    int vi = (int)lroundf(v);
-    int cl = vi;
-    if (cl < lo) cl = lo;
-    if (cl > hi) cl = hi;
-    lv_arc_set_value(arc, cl);
-    char s[8];
-    snprintf(s, sizeof(s), "%d", vi);   /* real value as text, even if clamped */
+    float cl = v;
+    if (cl < (float)lo) cl = (float)lo;
+    if (cl > (float)hi) cl = (float)hi;
+    lv_arc_set_value(arc, (int)lroundf(cl * 10.0f));
+
+    char s[16];
+    snprintf(s, sizeof(s), "%.1f", v);  /* real value as text, even if clamped */
     lv_label_set_text(lbl, s);
 }
 
 void ui_set_temperature(float celsius, bool valid)
 {
+    /* Colour follows the reading, so the gauge is legible at a glance even
+     * before the number is read. Held at the cold end while invalid. */
+    lv_color_t c = valid ? temp_color(celsius) : COL_T_COLD;
+    lv_obj_set_style_arc_color(arc_temp, c, LV_PART_INDICATOR);
+
     set_gauge(arc_temp, lbl_temp, celsius, valid, TEMP_MIN, TEMP_MAX);
 }
 
