@@ -61,8 +61,9 @@ static lv_obj_t *lbl_day,  *lbl_month;
 
 /* Face read-outs: icon + whole number + a smaller decimal, so the value
  * stays legible without eating the space either side of the hub. */
-#define ICON_W 15
-#define ICON_H 19
+#define ICON_W 18
+#define ICON_H 22
+#define ICON_SS 4   /* supersamples per axis, for antialiasing */
 static lv_obj_t *icon_fire, *icon_drop;
 static lv_obj_t *lbl_ft_int, *lbl_ft_dec;   /* face temperature */
 static lv_obj_t *lbl_fh_int, *lbl_fh_dec;   /* face humidity    */
@@ -146,68 +147,104 @@ static void draw_background(lv_obj_t *parent)
 
 /* ---------------------------------------------------------------------
  * Icons. LVGL ships a droplet (LV_SYMBOL_TINT) but no flame, so both are
- * drawn as polygons instead -- mixing a font glyph with a drawn shape
- * would read as two different styles sitting side by side.
- * Coordinates are in a 15x19 box; the flame has three tongues so it is not
- * mistaken for the droplet at this size. */
-static const lv_point_t FLAME_PTS[] = {
-    {7, 0}, {9, 5}, {11, 2}, {12, 8}, {14, 12},
-    {11, 18}, {4, 18}, {1, 12}, {3, 7}, {4, 2}, {6, 5},
-};
-static const lv_point_t DROP_PTS[] = {
-    {7, 0}, {9, 5}, {12, 10}, {12, 14}, {9, 18},
-    {5, 18}, {2, 14}, {2, 10}, {5, 5},
+ * drawn rather than mixing a font glyph with a shape.
+ *
+ * Vertices are floats, not integers: at this size a whole-pixel outline is
+ * what made the flame look chewed up. Sub-pixel vertices plus the
+ * supersampled fill below give smooth edges instead of staircases.
+ *
+ * The flame leans right and carries a small lick beside the main tip; the
+ * droplet is symmetric and smooth. That asymmetry is what tells them apart
+ * at a glance, rather than either one's fine detail.
+ */
+typedef struct { float x, y; } icon_pt_t;
+
+static const icon_pt_t FLAME_PTS[] = {
+    {11.2f,  0.6f},                                   /* main tip          */
+    {12.5f,  3.2f}, {13.7f,  5.6f}, {14.6f,  8.0f},
+    {15.4f, 10.6f}, {15.6f, 13.2f}, {15.0f, 15.8f},
+    {13.7f, 18.2f}, {11.6f, 20.0f}, { 9.2f, 20.9f},   /* round bottom      */
+    { 6.6f, 20.8f}, { 4.5f, 19.5f}, { 2.9f, 17.5f},
+    { 2.2f, 15.0f}, { 2.4f, 12.4f}, { 3.3f,  9.9f},
+    { 4.6f,  7.8f}, { 5.7f,  6.3f},                   /* left flank up     */
+    { 4.5f,  4.7f}, { 4.2f,  3.4f}, { 5.3f,  2.8f},   /* second lobe, blunt
+                                                       * enough to survive
+                                                       * at this size      */
+    { 6.4f,  3.9f},
+    { 8.1f,  6.5f},                                   /* valley between    */
+    { 9.9f,  3.1f},
 };
 
-/* Scanline fill straight into the canvas buffer.
- *
- * lv_canvas_draw_polygon() hangs on these outlines: LVGL's software polygon
- * renderer is built for convex shapes, and the flame's tongues are concave.
- * An even-odd scanline fill handles concavity correctly, and writing the
- * pixels directly is far cheaper than LVGL's mask machinery for a 15x19 icon.
- */
+static const icon_pt_t DROP_PTS[] = {
+    { 9.0f,  0.8f},                                   /* tip               */
+    {10.6f,  4.0f}, {12.2f,  7.0f}, {13.8f, 10.0f},
+    {14.4f, 13.0f}, {13.8f, 16.2f}, {11.8f, 19.2f},
+    { 9.0f, 20.8f},                                   /* bottom            */
+    { 6.2f, 19.2f}, { 4.2f, 16.2f}, { 3.6f, 13.0f},
+    { 4.2f, 10.0f}, { 5.8f,  7.0f}, { 7.4f,  4.0f},
+};
+
 static void draw_icon(uint8_t *buf, lv_obj_t *canvas,
-                      const lv_point_t *p, int n, lv_color_t col)
+                      const icon_pt_t *p, int n, lv_color_t col)
 {
     lv_color_t *px = (lv_color_t *)buf;
     memset(buf, 0, (size_t)ICON_W * ICON_H * sizeof(lv_color_t));  /* black */
 
-    for (int y = 0; y < ICON_H; y++) {
-        float xs[16];
-        int   cnt = 0;
-        float fy  = (float)y + 0.5f;        /* sample at pixel centres */
+    const lv_color_t bg = lv_color_black();
+    const int SS2 = ICON_SS * ICON_SS;
 
-        for (int i = 0; i < n && cnt < 16; i++) {
-            const lv_point_t *a = &p[i];
-            const lv_point_t *b = &p[(i + 1) % n];
-            if (a->y == b->y) continue;     /* horizontal edges add nothing */
-            /* Half-open test so a vertex shared by two edges counts once. */
-            if ((fy >= a->y && fy < b->y) || (fy >= b->y && fy < a->y)) {
-                float t = (fy - (float)a->y) / (float)(b->y - a->y);
-                xs[cnt++] = (float)a->x + t * (float)(b->x - a->x);
+    for (int y = 0; y < ICON_H; y++) {
+        uint8_t acc[ICON_W];
+        memset(acc, 0, sizeof(acc));
+
+        /* Even-odd scanline fill, supersampled. lv_canvas_draw_polygon()
+         * hangs outright on a concave outline like the flame -- LVGL's
+         * software polygon renderer assumes convex -- so the fill is done
+         * here, where coverage also comes out for free. */
+        for (int sy = 0; sy < ICON_SS; sy++) {
+            float fy = (float)y + ((float)sy + 0.5f) / (float)ICON_SS;
+
+            float xs[16];
+            int   cnt = 0;
+            for (int i = 0; i < n && cnt < 16; i++) {
+                const icon_pt_t *a = &p[i];
+                const icon_pt_t *b = &p[(i + 1) % n];
+                if (a->y == b->y) continue;
+                /* Half-open span so a shared vertex is counted once. */
+                if ((fy >= a->y && fy < b->y) || (fy >= b->y && fy < a->y)) {
+                    float t = (fy - a->y) / (b->y - a->y);
+                    xs[cnt++] = a->x + t * (b->x - a->x);
+                }
+            }
+            for (int i = 1; i < cnt; i++) {     /* insertion sort, cnt tiny */
+                float k = xs[i];
+                int   j = i - 1;
+                while (j >= 0 && xs[j] > k) { xs[j + 1] = xs[j]; j--; }
+                xs[j + 1] = k;
+            }
+
+            for (int x = 0; x < ICON_W; x++) {
+                for (int sx = 0; sx < ICON_SS; sx++) {
+                    float fx = (float)x + ((float)sx + 0.5f) / (float)ICON_SS;
+                    for (int i = 0; i + 1 < cnt; i += 2) {
+                        if (fx >= xs[i] && fx < xs[i + 1]) { acc[x]++; break; }
+                    }
+                }
             }
         }
 
-        for (int i = 1; i < cnt; i++) {     /* insertion sort, cnt is tiny */
-            float k = xs[i];
-            int   j = i - 1;
-            while (j >= 0 && xs[j] > k) { xs[j + 1] = xs[j]; j--; }
-            xs[j + 1] = k;
-        }
-
-        for (int i = 0; i + 1 < cnt; i += 2) {
-            int x0 = (int)ceilf(xs[i] - 0.5f);
-            int x1 = (int)floorf(xs[i + 1] - 0.5f);
-            if (x0 < 0) x0 = 0;
-            if (x1 > ICON_W - 1) x1 = ICON_W - 1;
-            for (int x = x0; x <= x1; x++) px[y * ICON_W + x] = col;
+        for (int x = 0; x < ICON_W; x++) {
+            if (!acc[x]) continue;
+            /* Partial coverage blends toward the black page behind. */
+            uint8_t mix = (uint8_t)(((int)acc[x] * 255) / SS2);
+            px[y * ICON_W + x] = (mix >= 255) ? col : lv_color_mix(col, bg, mix);
         }
     }
     lv_obj_invalidate(canvas);
 }
 
 static lv_obj_t *make_icon(lv_obj_t *parent, uint8_t *buf,
-                           const lv_point_t *pts, int n, lv_color_t col)
+                           const icon_pt_t *pts, int n, lv_color_t col)
 {
     lv_obj_t *c = lv_canvas_create(parent);
     lv_canvas_set_buffer(c, buf, ICON_W, ICON_H, LV_IMG_CF_TRUE_COLOR);
@@ -218,7 +255,7 @@ static lv_obj_t *make_icon(lv_obj_t *parent, uint8_t *buf,
 /* icon + "21" + ".5" on one baseline. Flex keeps the group centred on its
  * anchor however wide the number happens to be. */
 static lv_obj_t *make_readout(lv_obj_t *parent, int dx, uint8_t *buf,
-                              const lv_point_t *pts, int npts,
+                              const icon_pt_t *pts, int npts,
                               lv_color_t icon_col,
                               lv_obj_t **icon_out,
                               lv_obj_t **int_out, lv_obj_t **dec_out)
